@@ -32,9 +32,17 @@ jobs:
         shell: bash
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SERVER_SSH_KEY_B64 }}" | base64 -d > ~/.ssh/id_ed25519
+
+          echo "${{ secrets.SERVER_SSH_KEY_B64 }}" | base64 -d | tr -d '\r' > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
+
+          # Диагностика (ключ не раскрываем)
+          head -n 1 ~/.ssh/id_ed25519 || true
+          ssh-keygen -y -f ~/.ssh/id_ed25519 > /dev/null
+          echo "Private key OK"
+
           ssh-keyscan -p "${{ secrets.SERVER_PORT }}" "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
+      
 
       - name: Upload jar (scp)
         run: |
