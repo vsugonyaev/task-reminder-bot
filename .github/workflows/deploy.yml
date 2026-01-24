@@ -22,39 +22,30 @@ jobs:
       - name: Build
         run: mvn -DskipTests clean package
 
-      - name: Pick jar (not original-*)
+      - name: Pick jar
         run: |
-          echo "Artifacts:"
-          ls -lh target/*.jar
           JAR=$(ls -1 target/*.jar | grep -v 'original-' | head -n 1)
           echo "JAR_FILE=$JAR" >> $GITHUB_ENV
-          echo "Using jar: $JAR"
+          echo "Using $JAR"
 
-      - name: Encode jar as base64
-        run: |
-          base64 "${{ env.JAR_FILE }}" > app.jar.base64
-          ls -lh app.jar.base64
-
-      - name: Deploy via SSH (base64, no scp)
-        uses: appleboy/ssh-action@v1.0.3
+      # 🔐 ВОТ КЛЮЧЕВОЙ ШАГ — НОРМАЛЬНЫЙ SSH-АГЕНТ
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
         with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT }}
-          script: |
-            set -e
+          ssh-private-key: ${{ secrets.SERVER_SSH_KEY }}
 
-            echo "Receiving jar..."
-            cat > /tmp/app.jar.base64
+      - name: Add server to known_hosts
+        run: |
+          ssh-keyscan -p ${{ secrets.SERVER_PORT }} ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
 
-            echo "Installing jar..."
-            base64 -d /tmp/app.jar.base64 > /opt/task-reminder-bot/app.jar
-            rm -f /tmp/app.jar.base64
+      - name: Upload jar to server
+        run: |
+          rsync -avz --progress \
+            "$JAR_FILE" \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/task-reminder-bot/app.jar
 
-            chmod 644 /opt/task-reminder-bot/app.jar
-
-            sudo systemctl restart task-reminder-bot
-            sudo systemctl status task-reminder-bot --no-pager
-          input: |
-            $(cat app.jar.base64)
+      - name: Restart service
+        run: |
+          ssh -p ${{ secrets.SERVER_PORT }} \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
+            "sudo systemctl restart task-reminder-bot && sudo systemctl status task-reminder-bot --no-pager"
