@@ -42,7 +42,7 @@ jobs:
         run: |
           rsync -avz --progress \
             "$JAR_FILE" \
-            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/task-reminder-bot/app.jar
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/task-reminder-bot/
 
       - name: Restart service
         run: |
