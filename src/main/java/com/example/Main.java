@@ -39,20 +39,23 @@ public class Main {
 
         long chatId = Long.parseLong(chatIdStr);
 
-        // 1) Telegram bot init
+
+        // 1) Quartz scheduler init
+        Scheduler scheduler = StdSchedulerFactory.getDefaultScheduler();
+
+        // 2) Telegram bot init
         ReminderBot bot = new ReminderBot(token, username);
+        bot.setScheduler(scheduler);
+        scheduler.getContext().put("bot", bot);
         TelegramBotsApi api = new TelegramBotsApi(DefaultBotSession.class);
         api.registerBot(bot);
 
-        // 2) Quartz scheduler init
-        Scheduler scheduler = StdSchedulerFactory.getDefaultScheduler();
         bot.setScheduler(scheduler);
         JobDetail job = newJob(ReminderJob.class)
                 .withIdentity("reminderJob")
                 .usingJobData("chatId", chatId)
                 .build();
-        job.getJobDataMap().put("bot", bot);
-        job.getJobDataMap().put("scheduler", scheduler);
+
 
         // Cron: second minute hour day-of-month month day-of-week year(optional)
         // Mon/Wed/Fri at 16:30 MSK

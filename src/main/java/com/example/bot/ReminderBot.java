@@ -104,7 +104,8 @@ public class ReminderBot extends TelegramLongPollingBot {
 
     private void scheduleUnpin(org.quartz.Scheduler scheduler, long chatId, int messageId, int afterHours) {
         try {
-            String key = "unpin_" + chatId + "_" + messageId;
+            String key = "unpin_" + chatId + "_" + messageId + "_" + System.currentTimeMillis();
+
 
             org.quartz.JobDetail unpinJob = org.quartz.JobBuilder.newJob(UnpinJob.class)
                     .withIdentity(key)
@@ -112,7 +113,7 @@ public class ReminderBot extends TelegramLongPollingBot {
                     .usingJobData("messageId", messageId)
                     .build();
 
-            unpinJob.getJobDataMap().put("bot", this);
+
 
             java.util.Date runAt = java.util.Date.from(
                     java.time.Instant.now().plus(afterHours, java.time.temporal.ChronoUnit.HOURS)
