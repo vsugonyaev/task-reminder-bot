@@ -23,12 +23,22 @@ jobs:
         run: mvn -DskipTests clean package
 
       - name: Pick jar (not original-*)
+        id: pick_jar
         run: |
           echo "Artifacts:"
           ls -lh target/*.jar
           JAR=$(ls -1 target/*.jar | grep -v 'original-' | head -n 1)
           echo "JAR_FILE=$JAR" >> $GITHUB_ENV
           echo "Using jar: $JAR"
+
+      - name: Encode jar as base64
+        id: encode_jar
+        shell: bash
+        run: |
+          base64 "${{ env.JAR_FILE }}" > app.jar.base64
+          echo "ENCODED_FILE=app.jar.base64" >> $GITHUB_ENV
+          echo "Base64 file size:"
+          ls -lh app.jar.base64
 
       - name: Test SSH connection
         uses: appleboy/ssh-action@v1.0.3
@@ -42,21 +52,8 @@ jobs:
             whoami
             echo "On host:"
             hostname
-            echo "Listing app dir:"
-            ls -la /opt/task-reminder-bot || true
 
-      - name: Upload jar to server (/tmp)
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT }}
-          source: "${{ env.JAR_FILE }}"
-          target: "/tmp"
-          strip_components: 1
-
-      - name: Deploy & restart systemd service
+      - name: Deploy via SSH (no scp)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -65,15 +62,16 @@ jobs:
           port: ${{ secrets.SERVER_PORT }}
           script: |
             set -e
+            echo "Receiving jar (base64) into /tmp/app.jar.base64 ..."
+            cat > /tmp/app.jar.base64
 
-            # backup current
-            if [ -f /opt/task-reminder-bot/app.jar ]; then
-              cp /opt/task-reminder-bot/app.jar /opt/task-reminder-bot/app.jar.bak
-            fi
+            echo "Decoding to /opt/task-reminder-bot/app.jar ..."
+            base64 -d /tmp/app.jar.base64 > /opt/task-reminder-bot/app.jar
+            rm -f /tmp/app.jar.base64
 
-            # install new jar
-            mv /tmp/task-reminder-bot-*.jar /opt/task-reminder-bot/app.jar
+            chmod 644 /opt/task-reminder-bot/app.jar
 
-            # restart service
             sudo systemctl restart task-reminder-bot
             sudo systemctl status task-reminder-bot --no-pager
+          input: |
+            $(cat app.jar.base64)
