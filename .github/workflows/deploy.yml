@@ -38,6 +38,12 @@ jobs:
         run: |
           ssh-keyscan -p ${{ secrets.SERVER_PORT }} ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
 
+      - name: Debug destination
+        run: |
+            echo "USER='${{ secrets.SERVER_USER }}'"
+            echo "HOST='${{ secrets.SERVER_HOST }}'"
+            echo "PORT='${{ secrets.SERVER_PORT }}'"
+
       - name: Upload jar to server
         run: |
           rsync -avz --progress \
