@@ -28,33 +28,26 @@ jobs:
           echo "JAR_FILE=$JAR" >> $GITHUB_ENV
           echo "Using $JAR"
 
-      # 🔐 ВОТ КЛЮЧЕВОЙ ШАГ — НОРМАЛЬНЫЙ SSH-АГЕНТ
-      - name: Setup SSH agent
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SERVER_SSH_KEY }}
-
-      - name: Add server to known_hosts
+      - name: Prepare SSH key
+        shell: bash
         run: |
-          ssh-keyscan -p ${{ secrets.SERVER_PORT }} ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY_B64 }}" | base64 -d > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "${{ secrets.SERVER_PORT }}" "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: Debug destination
+      - name: Upload jar (scp)
         run: |
-            echo "USER='${{ secrets.SERVER_USER }}'"
-            echo "HOST='${{ secrets.SERVER_HOST }}'"
-            echo "PORT='${{ secrets.SERVER_PORT }}'"
+          scp -i ~/.ssh/id_ed25519 -P "${{ secrets.SERVER_PORT }}" \
+            "$JAR_FILE" \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/app.jar"
 
-      - name: Upload jar to server
+      - name: Install & restart
         run: |
-          rsync -avz --progress \
-          --rsync-path="sudo mkdir -p /opt/task-reminder-bot && sudo rsync" \
-          -e "ssh -p ${{ secrets.SERVER_PORT }}" \
-          "$JAR_FILE" \
-          "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/task-reminder-bot/"
-  
-
-      - name: Restart service
-        run: |
-          ssh -p ${{ secrets.SERVER_PORT }} \
-            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
-            "sudo systemctl restart task-reminder-bot && sudo systemctl status task-reminder-bot --no-pager"
+          ssh -i ~/.ssh/id_ed25519 -p "${{ secrets.SERVER_PORT }}" \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
+            "sudo mkdir -p /opt/task-reminder-bot && \
+             sudo mv /tmp/app.jar /opt/task-reminder-bot/app.jar && \
+             sudo chmod 644 /opt/task-reminder-bot/app.jar && \
+             sudo systemctl restart task-reminder-bot && \
+             sudo systemctl status task-reminder-bot --no-pager"
