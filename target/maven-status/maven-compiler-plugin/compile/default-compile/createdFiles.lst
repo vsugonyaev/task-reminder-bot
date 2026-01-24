@@ -1,0 +1,4 @@
+com\example\Main.class
+com\example\bot\ReminderJob.class
+com\example\bot\ReminderBot.class
+com\example\bot\UnpinJob.class
