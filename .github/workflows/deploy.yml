@@ -57,6 +57,11 @@ jobs:
 
           ssh-keyscan -p "${{ secrets.SERVER_PORT }}" "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
 
+      - name: SSH whoami test
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -p "${{ secrets.SERVER_PORT }}" \
+          "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" "whoami"
+
       - name: Upload jar (scp)
         shell: bash
         run: |
