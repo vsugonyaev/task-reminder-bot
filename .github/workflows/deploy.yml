@@ -47,8 +47,11 @@ jobs:
       - name: Upload jar to server
         run: |
           rsync -avz --progress \
-            "$JAR_FILE" \
-            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/task-reminder-bot/
+          --rsync-path="sudo mkdir -p /opt/task-reminder-bot && sudo rsync" \
+          -e "ssh -p ${{ secrets.SERVER_PORT }}" \
+          "$JAR_FILE" \
+          "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/task-reminder-bot/"
+  
 
       - name: Restart service
         run: |
