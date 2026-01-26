@@ -39,8 +39,8 @@ public class ReminderBot extends TelegramLongPollingBot {
                         return;
                     }
                     String msg = "✅ Тестовое уведомление 😄📌\n\n"
-                            + "Сейчас закреплю это сообщение и сниму закреп через 2 часа ⏳🔁";
-                    sendPinAndAutoUnpin(scheduler, chatId, msg, 2);
+                            + "Сейчас закреплю это сообщение и сниму закреп через 5 минут ⏳🔁";
+                    sendPinAndAutoUnpinMinutes(scheduler, chatId, msg, 5);
                 }
 
                 default -> { /* ничего */ }
@@ -91,21 +91,24 @@ public class ReminderBot extends TelegramLongPollingBot {
                     .chatId(String.valueOf(chatId))
                     .messageId(messageId)
                     .build());
+            System.out.println("[UNPIN OK] chatId=" + chatId + ", messageId=" + messageId);
         } catch (TelegramApiException e) {
-            throw new RuntimeException("Failed to unpin message", e);
+            // ВАЖНО: печатаем причину, иначе кажется “не распинивает”
+            System.out.println("[UNPIN FAIL] chatId=" + chatId + ", messageId=" + messageId
+                    + ", error=" + e.getMessage());
+            e.printStackTrace();
         }
     }
 
-    public void sendPinAndAutoUnpin(org.quartz.Scheduler scheduler, long chatId, String text, int unpinAfterHours) {
+    public void sendPinAndAutoUnpinMinutes(org.quartz.Scheduler scheduler, long chatId, String text, int unpinAfterMinutes) {
         int messageId = sendAndGetMessageId(chatId, text);
         pinMessage(chatId, messageId);
-        scheduleUnpin(scheduler, chatId, messageId, unpinAfterHours);
+        scheduleUnpinMinutes(scheduler, chatId, messageId, unpinAfterMinutes);
     }
 
-    private void scheduleUnpin(org.quartz.Scheduler scheduler, long chatId, int messageId, int afterHours) {
+    private void scheduleUnpinMinutes(org.quartz.Scheduler scheduler, long chatId, int messageId, int afterMinutes) {
         try {
             String key = "unpin_" + chatId + "_" + messageId + "_" + System.currentTimeMillis();
-
 
             org.quartz.JobDetail unpinJob = org.quartz.JobBuilder.newJob(UnpinJob.class)
                     .withIdentity(key)
@@ -113,10 +116,8 @@ public class ReminderBot extends TelegramLongPollingBot {
                     .usingJobData("messageId", messageId)
                     .build();
 
-
-
             java.util.Date runAt = java.util.Date.from(
-                    java.time.Instant.now().plus(afterHours, java.time.temporal.ChronoUnit.HOURS)
+                    java.time.Instant.now().plus(afterMinutes, java.time.temporal.ChronoUnit.MINUTES)
             );
 
             org.quartz.Trigger trigger = org.quartz.TriggerBuilder.newTrigger()
@@ -127,8 +128,9 @@ public class ReminderBot extends TelegramLongPollingBot {
                     .build();
 
             scheduler.scheduleJob(unpinJob, trigger);
+            System.out.println("[SCHEDULE] Unpin in " + afterMinutes + " minutes: chatId=" + chatId + ", messageId=" + messageId);
         } catch (org.quartz.SchedulerException e) {
-            throw new RuntimeException("Failed to schedule unpin", e);
+            throw new RuntimeException("Failed to schedule unpin (minutes)", e);
         }
     }
 

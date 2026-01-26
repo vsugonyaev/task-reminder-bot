@@ -20,7 +20,7 @@ public class ReminderJob implements Job {
                             "Проверьте и закройте задачи до конца дня 📌🔥🧩\n" +
                             "Если есть блокеры — пишите в чат 🛑🙋";
 
-            bot.sendPinAndAutoUnpin(scheduler, chatId, text, 2);
+            bot.sendPinAndAutoUnpinMinutes(scheduler, chatId, text, 2);
         } catch (Exception e) {
             e.printStackTrace();
         }
