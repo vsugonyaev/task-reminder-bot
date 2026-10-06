@@ -1,72 +1,160 @@
 package com.example.bot;
 
-import org.telegram.telegrambots.bots.TelegramLongPollingBot;
+import org.quartz.JobBuilder;
+import org.quartz.JobDetail;
+import org.quartz.Scheduler;
+import org.quartz.SchedulerException;
+import org.quartz.SimpleScheduleBuilder;
+import org.quartz.Trigger;
+import org.quartz.TriggerBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.telegram.telegrambots.longpolling.util.LongPollingSingleThreadUpdateConsumer;
+import org.telegram.telegrambots.meta.api.methods.pinnedmessages.PinChatMessage;
+import org.telegram.telegrambots.meta.api.methods.pinnedmessages.UnpinChatMessage;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.message.Message;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
+import org.telegram.telegrambots.meta.generics.TelegramClient;
+
+import com.example.sprint.SprintSchedule;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Date;
+import java.util.stream.Collectors;
 
 /**
  * Minimal Telegram bot for scheduled reminders.
- * Supports /chatid command to reveal chatId in a group.
+ *
+ * Commands:
+ *  - /chatid — reveals chatId of any chat (needed to configure TG_CHAT_ID)
+ *  - /sprint — shows current sprint and its reminder days
+ *  - /test   — previews the next reminder (pinned for 5 minutes); works only in the target chat
+ *  - /test start — same for the sprint planning day warning
  */
-public class ReminderBot extends TelegramLongPollingBot {
+public class ReminderBot implements LongPollingSingleThreadUpdateConsumer {
 
-    private final String token;
-    private final String username;
+    private static final Logger log = LoggerFactory.getLogger(ReminderBot.class);
 
-    private volatile org.quartz.Scheduler scheduler;
-    public void setScheduler(org.quartz.Scheduler scheduler) {
+    private static final Duration TEST_PIN_DURATION = Duration.ofMinutes(5);
+
+    private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("dd.MM");
+
+    private final TelegramClient client;
+    private final Scheduler scheduler;
+    private final long targetChatId;
+    private final SprintSchedule sprints;
+    private final LocalTime reminderTime;
+    private final LocalTime sprintStartTime;
+
+    public ReminderBot(TelegramClient client, Scheduler scheduler, long targetChatId,
+                       SprintSchedule sprints, LocalTime reminderTime, LocalTime sprintStartTime) {
+        this.client = client;
         this.scheduler = scheduler;
-    }
-
-    public ReminderBot(String token, String username) {
-        this.token = token;
-        this.username = username;
+        this.targetChatId = targetChatId;
+        this.sprints = sprints;
+        this.reminderTime = reminderTime;
+        this.sprintStartTime = sprintStartTime;
     }
 
     @Override
-    public void onUpdateReceived(Update update) {
-        if (update.hasMessage() && update.getMessage().hasText()) {
-            String text = update.getMessage().getText().trim();
-            long chatId = update.getMessage().getChatId();
+    public void consume(Update update) {
+        if (!update.hasMessage() || !update.getMessage().hasText()) {
+            return;
+        }
+        long chatId = update.getMessage().getChatId();
+        String[] parts = update.getMessage().getText().trim().split("\\s+", 2);
+        String arg = parts.length > 1 ? parts[1].trim() : "";
 
-            switch (text) {
+        try {
+            switch (parseCommand(parts[0])) {
                 case "/chatid" -> send(chatId, "chatId: " + chatId);
 
+                case "/sprint" -> send(chatId, sprintInfo());
+
                 case "/test" -> {
-                    if (scheduler == null) {
-                        send(chatId, "⚠️ Scheduler не готов. Перезапусти приложение.");
+                    if (chatId != targetChatId) {
+                        log.info("Ignored /test from chat {} (target chat is {})", chatId, targetChatId);
                         return;
                     }
-                    String msg = "✅ Тестовое уведомление 😄📌\n\n"
-                            + "Сейчас закреплю это сообщение и сниму закреп через 5 минут ⏳🔁";
-                    sendPinAndAutoUnpinMinutes(scheduler, chatId, msg, 5);
+                    boolean start = arg.equalsIgnoreCase("start");
+                    LocalDate day = start ? nextPlanningDay() : nextReminderDay();
+                    String text = start ? ReminderTexts.sprintStart(sprints.sprintOf(day)) : reminderText(day);
+                    String msg = "🧪 <i>Тест: так будет выглядеть " + (start ? "предупреждение " : "напоминание ")
+                            + DATE.format(day) + ". Закреп снимется через "
+                            + TEST_PIN_DURATION.toMinutes() + " мин.</i>\n\n" + text;
+                    sendPinAndAutoUnpin(chatId, msg, TEST_PIN_DURATION);
                 }
 
                 default -> { /* ничего */ }
             }
+        } catch (RuntimeException e) {
+            log.error("Failed to handle update in chat {}", chatId, e);
         }
     }
 
-    public void send(long chatId, String text) {
-        SendMessage msg = SendMessage.builder()
-                .chatId(String.valueOf(chatId))
-                .text(text)
-                .build();
-        try {
-            execute(msg);
-        } catch (TelegramApiException e) {
-            throw new RuntimeException("Failed to send message", e);
+    private String reminderText(LocalDate day) {
+        boolean lastDay = sprints.lastReminderDay(day).map(day::equals).orElse(false);
+        return ReminderTexts.forDay(sprints.sprintOf(day), day, lastDay);
+    }
+
+    /** Today if today's reminder is still ahead, otherwise the next reminder day. */
+    private LocalDate nextReminderDay() {
+        return nextDay(reminderTime, sprints::isReminderDay);
+    }
+
+    /** Same for the sprint planning day warning. */
+    private LocalDate nextPlanningDay() {
+        return nextDay(sprintStartTime, sprints::isPlanningDay);
+    }
+
+    private static LocalDate nextDay(LocalTime sendTime, java.util.function.Predicate<LocalDate> matches) {
+        LocalDate day = LocalDate.now(ReminderJob.ZONE);
+        if (!LocalTime.now(ReminderJob.ZONE).isBefore(sendTime)) {
+            day = day.plusDays(1);
         }
+        while (!matches.test(day)) {
+            day = day.plusDays(1);
+        }
+        return day;
+    }
+
+    private String sprintInfo() {
+        SprintSchedule.Sprint sprint = sprints.sprintOf(LocalDate.now(ReminderJob.ZONE));
+        String planning = sprints.planningDay(sprint).map(DATE::format).orElse("—");
+        String days = sprints.reminderDays(sprint).stream()
+                .map(DATE::format)
+                .collect(Collectors.joining(", "));
+        return "🏃 <b>Спринт " + DATE.format(sprint.start()) + " — " + DATE.format(sprint.end()) + "</b>\n"
+                + "⛔ Планирование, задачи не закрываем: " + planning + " (" + sprintStartTime + " МСК)\n"
+                + "⏰ Напоминания (" + reminderTime + " МСК): " + days + "\n"
+                + "Следующее напоминание: " + DATE.format(nextReminderDay()) + "\n"
+                + "Следующее планирование: " + DATE.format(nextPlanningDay());
+    }
+
+    /** "/test@my_bot" -> "/test" */
+    private static String parseCommand(String command) {
+        int at = command.indexOf('@');
+        return at >= 0 ? command.substring(0, at) : command;
+    }
+
+    public void send(long chatId, String text) {
+        sendAndGetMessageId(chatId, text);
     }
 
     public int sendAndGetMessageId(long chatId, String text) {
         SendMessage msg = SendMessage.builder()
                 .chatId(String.valueOf(chatId))
                 .text(text)
+                .parseMode("HTML")
                 .build();
         try {
-            org.telegram.telegrambots.meta.api.objects.Message sent = execute(msg);
+            Message sent = client.execute(msg);
             return sent.getMessageId();
         } catch (TelegramApiException e) {
             throw new RuntimeException("Failed to send message", e);
@@ -75,7 +163,7 @@ public class ReminderBot extends TelegramLongPollingBot {
 
     public void pinMessage(long chatId, int messageId) {
         try {
-            execute(org.telegram.telegrambots.meta.api.methods.pinnedmessages.PinChatMessage.builder()
+            client.execute(PinChatMessage.builder()
                     .chatId(String.valueOf(chatId))
                     .messageId(messageId)
                     .disableNotification(true)
@@ -87,60 +175,43 @@ public class ReminderBot extends TelegramLongPollingBot {
 
     public void unpinMessage(long chatId, int messageId) {
         try {
-            execute(org.telegram.telegrambots.meta.api.methods.pinnedmessages.UnpinChatMessage.builder()
+            client.execute(UnpinChatMessage.builder()
                     .chatId(String.valueOf(chatId))
                     .messageId(messageId)
                     .build());
-            System.out.println("[UNPIN OK] chatId=" + chatId + ", messageId=" + messageId);
+            log.info("Unpinned: chatId={}, messageId={}", chatId, messageId);
         } catch (TelegramApiException e) {
-            // ВАЖНО: печатаем причину, иначе кажется “не распинивает”
-            System.out.println("[UNPIN FAIL] chatId=" + chatId + ", messageId=" + messageId
-                    + ", error=" + e.getMessage());
-            e.printStackTrace();
+            log.error("Failed to unpin: chatId={}, messageId={}", chatId, messageId, e);
         }
     }
 
-    public void sendPinAndAutoUnpinMinutes(org.quartz.Scheduler scheduler, long chatId, String text, int unpinAfterMinutes) {
+    public void sendPinAndAutoUnpin(long chatId, String text, Duration pinDuration) {
         int messageId = sendAndGetMessageId(chatId, text);
         pinMessage(chatId, messageId);
-        scheduleUnpinMinutes(scheduler, chatId, messageId, unpinAfterMinutes);
+        scheduleUnpin(chatId, messageId, pinDuration);
     }
 
-    private void scheduleUnpinMinutes(org.quartz.Scheduler scheduler, long chatId, int messageId, int afterMinutes) {
+    private void scheduleUnpin(long chatId, int messageId, Duration after) {
+        String key = "unpin_" + chatId + "_" + messageId;
+
+        JobDetail unpinJob = JobBuilder.newJob(UnpinJob.class)
+                .withIdentity(key)
+                .usingJobData("chatId", chatId)
+                .usingJobData("messageId", messageId)
+                .build();
+
+        Trigger trigger = TriggerBuilder.newTrigger()
+                .withIdentity("trigger_" + key)
+                .startAt(Date.from(Instant.now().plus(after)))
+                .withSchedule(SimpleScheduleBuilder.simpleSchedule()
+                        .withMisfireHandlingInstructionFireNow())
+                .build();
+
         try {
-            String key = "unpin_" + chatId + "_" + messageId + "_" + System.currentTimeMillis();
-
-            org.quartz.JobDetail unpinJob = org.quartz.JobBuilder.newJob(UnpinJob.class)
-                    .withIdentity(key)
-                    .usingJobData("chatId", chatId)
-                    .usingJobData("messageId", messageId)
-                    .build();
-
-            java.util.Date runAt = java.util.Date.from(
-                    java.time.Instant.now().plus(afterMinutes, java.time.temporal.ChronoUnit.MINUTES)
-            );
-
-            org.quartz.Trigger trigger = org.quartz.TriggerBuilder.newTrigger()
-                    .withIdentity("trigger_" + key)
-                    .startAt(runAt)
-                    .withSchedule(org.quartz.SimpleScheduleBuilder.simpleSchedule()
-                            .withMisfireHandlingInstructionFireNow())
-                    .build();
-
             scheduler.scheduleJob(unpinJob, trigger);
-            System.out.println("[SCHEDULE] Unpin in " + afterMinutes + " minutes: chatId=" + chatId + ", messageId=" + messageId);
-        } catch (org.quartz.SchedulerException e) {
-            throw new RuntimeException("Failed to schedule unpin (minutes)", e);
+            log.info("Unpin scheduled in {}: chatId={}, messageId={}", after, chatId, messageId);
+        } catch (SchedulerException e) {
+            throw new RuntimeException("Failed to schedule unpin", e);
         }
-    }
-
-    @Override
-    public String getBotUsername() {
-        return username;
-    }
-
-    @Override
-    public String getBotToken() {
-        return token;
     }
 }
