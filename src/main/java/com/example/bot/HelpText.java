@@ -80,9 +80,7 @@ final class HelpText {
         if (rights != null) {
             sb.append("\n👤 <b>Вам доступно:</b> ").append(rightsText(rights)).append('\n');
         }
-        if (kind != ChatKind.OTHER) {
-            sb.append("\n<i>Сообщение удалится через ").append(config.helpDeleteAfter().toMinutes()).append(" мин.</i>");
-        }
+        sb.append("\n<i>Сообщение удалится через ").append(config.commandsDeleteAfter().toMinutes()).append(" мин.</i>");
         return sb.toString();
     }
 

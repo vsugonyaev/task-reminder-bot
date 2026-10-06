@@ -43,13 +43,13 @@ public record AppConfig(
         LocalDate sprintAnchor,
         int sprintLengthDays,
         String scrumMaster,
-        Duration testPinDuration,
         String meetingTeam,
         Duration meetingRemindBefore,
         Duration meetingDeleteAfter,
         /** Enabled meetings only (those with a room set). */
         Map<Meeting.Type, Meeting> meetings,
-        Duration helpDeleteAfter,
+        /** Commands and the bot replies to them are deleted after this. */
+        Duration commandsDeleteAfter,
         /** Artifact commands on/off; when off the DB is not opened and only reminders work. */
         boolean artifactsEnabled,
         Path artifactsDbPath,
@@ -74,7 +74,6 @@ public record AppConfig(
             Map.entry("sprint.anchor", "2026-10-07"),
             Map.entry("sprint.length-days", "14"),
             Map.entry("scrum-master", "@vsugonyaev"),
-            Map.entry("test.pin-minutes", "5"),
             Map.entry("meeting.team", "СУБО2_1-STRLPL"),
             Map.entry("meeting.remind-before-minutes", "5"),
             Map.entry("meeting.delete-after-minutes", "5"),
@@ -84,7 +83,7 @@ public record AppConfig(
             Map.entry("meeting.daily.room", "https://dion.vc/event/mestnikovat"),
             Map.entry("meeting.review.time", "10:00"),
             Map.entry("meeting.review.room", "https://dion.vc/event/ptohov"),
-            Map.entry("help.delete-after-minutes", "5"),
+            Map.entry("commands.delete-after-minutes", "5"),
             Map.entry("artifacts.enabled", "false"),
             Map.entry("artifacts.db-path", "artifacts.db"),
             Map.entry("artifacts.types", "SA, BA, Макеты, ТПиС, ПТР, ПМИ, ПСИ, ТКР, ТИС, АР, АИС, Тест-план к4"),
@@ -137,12 +136,11 @@ public record AppConfig(
                 required(props, "sprint.anchor", LocalDate::parse),
                 required(props, "sprint.length-days", AppConfig::positiveInt),
                 required(props, "scrum-master", Function.identity()),
-                required(props, "test.pin-minutes", v -> Duration.ofMinutes(positiveInt(v))),
                 required(props, "meeting.team", Function.identity()),
                 required(props, "meeting.remind-before-minutes", v -> Duration.ofMinutes(positiveInt(v))),
                 required(props, "meeting.delete-after-minutes", v -> Duration.ofMinutes(positiveInt(v))),
                 meetings(props),
-                required(props, "help.delete-after-minutes", v -> Duration.ofMinutes(positiveInt(v))),
+                required(props, "commands.delete-after-minutes", v -> Duration.ofMinutes(positiveInt(v))),
                 required(props, "artifacts.enabled", AppConfig::bool),
                 required(props, "artifacts.db-path", Path::of),
                 required(props, "artifacts.types", AppConfig::list),
@@ -271,10 +269,9 @@ public record AppConfig(
                 + ", sprintStartTime=" + sprintStartTime + ", reminderTime=" + reminderTime
                 + ", unpinTime=" + unpinTime + ", sprintAnchor=" + sprintAnchor
                 + ", sprintLengthDays=" + sprintLengthDays + ", scrumMaster=" + scrumMaster
-                + ", testPinDuration=" + testPinDuration
                 + ", meetingTeam=" + meetingTeam + ", meetingRemindBefore=" + meetingRemindBefore
                 + ", meetingDeleteAfter=" + meetingDeleteAfter + ", meetings=" + meetings.values()
-                + ", helpDeleteAfter=" + helpDeleteAfter + ", artifactsEnabled=" + artifactsEnabled
+                + ", commandsDeleteAfter=" + commandsDeleteAfter + ", artifactsEnabled=" + artifactsEnabled
                 + ", artifactsDbPath=" + artifactsDbPath + ", artifactTypes=" + artifactTypes
                 + ", epicKeyPrefixes=" + epicKeyPrefixes + ", artifactResultTtl=" + artifactResultTtl
                 + ", artifactDialogTimeout=" + artifactDialogTimeout

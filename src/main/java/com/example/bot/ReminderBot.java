@@ -169,7 +169,10 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
                     ? isTestChat(chatId)
                     : chatId == config.chatId() || isTestChat(chatId);
             if (artifacts != null && allowedChat && message.getFrom() != null) {
+                // Artifact dialogs clean up their own messages
                 artifacts.onCommand(command, chatId, message.getFrom(), message.getMessageId());
+            } else {
+                deleteLater(chatId, message.getMessageId(), config.commandsDeleteAfter());
             }
             return;
         }
@@ -179,12 +182,17 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
             }
             return;
         }
+        if (!OWN_COMMANDS.contains(command)) {
+            return; // someone else's command
+        }
 
+        // Every command and every reply to it is removed after commands.delete-after-minutes
+        deleteLater(chatId, message.getMessageId(), config.commandsDeleteAfter());
         try {
             switch (command) {
-                case "/chatid" -> send(chatId, "chatId: " + chatId);
+                case "/chatid" -> reply(chatId, "chatId: " + chatId);
 
-                case "/sprint" -> send(chatId, sprintInfo());
+                case "/sprint" -> reply(chatId, sprintInfo());
 
                 case "/help" -> help(message);
 
@@ -200,21 +208,30 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
                     boolean start = arg.equalsIgnoreCase("start");
                     LocalDate day = start ? nextPlanningDay() : nextReminderDay();
                     String text = start ? sprintStartText(day) : reminderText(day);
-                    Duration pin = config.testPinDuration();
                     String msg = "🧪 <i>Тест: так будет выглядеть " + (start ? "предупреждение " : "напоминание ")
-                            + DATE.format(day) + ". Закреп снимется через " + pin.toMinutes() + " мин.</i>\n\n"
-                            + text;
-                    sendPinAndAutoUnpin(chatId, msg, pin);
+                            + DATE.format(day) + ". Сообщение удалится через "
+                            + config.commandsDeleteAfter().toMinutes() + " мин.</i>\n\n" + text;
+                    // Pinned until deleted: deleting a message also removes it from pins
+                    pinMessage(chatId, reply(chatId, msg));
                 }
 
-                default -> { /* ничего */ }
+                default -> { /* not reachable: filtered by OWN_COMMANDS */ }
             }
         } catch (RuntimeException e) {
             log.error("Failed to handle update in chat {}", chatId, e);
         }
     }
 
-    /** In work/test chats shows the user's rights and cleans up after itself; elsewhere — general help. */
+    private static final Set<String> OWN_COMMANDS = Set.of("/chatid", "/sprint", "/help", "/test");
+
+    /** Sends a reply to a command and schedules its deletion. Returns the message id. */
+    private int reply(long chatId, String html) {
+        int id = sendAndGetMessageId(chatId, html);
+        deleteLater(chatId, id, config.commandsDeleteAfter());
+        return id;
+    }
+
+    /** Help tailored to the chat; in work/test chats with artifacts on also shows the user's rights. */
     private void help(Message message) {
         long chatId = message.getChatId();
         HelpText.ChatKind kind = chatId == config.chatId() ? HelpText.ChatKind.WORK
@@ -231,11 +248,7 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
             }
         }
 
-        int helpId = send(chatId, HelpText.build(config, kind, artifacts != null, rights), null);
-        if (kind != HelpText.ChatKind.OTHER) {
-            deleteLater(chatId, helpId, config.helpDeleteAfter());
-            deleteLater(chatId, message.getMessageId(), config.helpDeleteAfter());
-        }
+        reply(chatId, HelpText.build(config, kind, artifacts != null, rights));
     }
 
     private void testMeeting(long chatId, String arg) {
@@ -243,7 +256,7 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
         Meeting meeting = type != null ? config.meetings().get(type) : null;
         if (meeting == null) {
             String known = config.meetings().keySet().stream().map(Meeting.Type::key).collect(Collectors.joining(", "));
-            send(chatId, "Использование: /test, /test start, /test &lt;встреча&gt;\nВстречи: " + known);
+            reply(chatId, "Использование: /test, /test start, /test &lt;встреча&gt;\nВстречи: " + known);
             return;
         }
         sendMeetingReminder(chatId, meeting);
@@ -452,7 +465,8 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
                     .build());
             log.info("Deleted: chatId={}, messageId={}", chatId, messageId);
         } catch (TelegramApiException e) {
-            log.error("Failed to delete: chatId={}, messageId={}", chatId, messageId, e);
+            // Usually the message was already deleted by someone — not worth a stack trace
+            log.warn("Failed to delete: chatId={}, messageId={}: {}", chatId, messageId, e.getMessage());
         }
     }
 
