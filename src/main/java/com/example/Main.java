@@ -1,10 +1,12 @@
 package com.example;
 
+import com.example.bot.MeetingJob;
 import com.example.bot.ReminderBot;
 import com.example.bot.ReminderJob;
 import com.example.bot.SprintStartJob;
 import com.example.calendar.ProductionCalendar;
 import com.example.config.AppConfig;
+import com.example.meeting.Meeting;
 import com.example.sprint.SprintSchedule;
 import org.quartz.*;
 import org.quartz.impl.StdSchedulerFactory;
@@ -24,7 +26,8 @@ import static org.quartz.TriggerBuilder.newTrigger;
  *
  * Schedule (times and sprints are configured in config.properties, see {@link AppConfig}):
  *  - planning day (first working day of a sprint) — warning not to close tasks today;
- *  - every other working day of a sprint — reminder to close tasks.
+ *  - every other working day of a sprint — reminder to close tasks;
+ *  - a few minutes before team meetings (planning / daily / review) — reminder with a link to the room.
  * Days off are taken from the Russian production calendar.
  */
 public class Main {
@@ -50,6 +53,14 @@ public class Main {
         // Both jobs fire every day and decide themselves whether today is their day
         scheduleDaily(scheduler, ReminderJob.class, "reminder", config.reminderTime(), config);
         scheduleDaily(scheduler, SprintStartJob.class, "sprintStart", config.sprintStartTime(), config);
+        for (Meeting meeting : config.meetings().values()) {
+            LocalTime remindAt = meeting.time().minus(config.meetingRemindBefore());
+            JobDetail job = newJob(MeetingJob.class)
+                    .withIdentity("meeting_" + meeting.type().key() + "Job")
+                    .usingJobData("type", meeting.type().name())
+                    .build();
+            scheduler.scheduleJob(job, dailyTrigger("meeting_" + meeting.type().key(), remindAt, config));
+        }
         scheduler.start();
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -74,13 +85,15 @@ public class Main {
                 .withIdentity(name + "Job")
                 .build();
 
-        Trigger trigger = newTrigger()
+        scheduler.scheduleJob(job, dailyTrigger(name, time, config));
+    }
+
+    private static Trigger dailyTrigger(String name, LocalTime time, AppConfig config) {
+        return newTrigger()
                 .withIdentity(name + "Trigger")
                 .withSchedule(CronScheduleBuilder
                         .dailyAtHourAndMinute(time.getHour(), time.getMinute())
                         .inTimeZone(TimeZone.getTimeZone(config.zone())))
                 .build();
-
-        scheduler.scheduleJob(job, trigger);
     }
 }

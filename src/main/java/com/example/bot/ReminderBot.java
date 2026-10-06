@@ -1,5 +1,6 @@
 package com.example.bot;
 
+import org.quartz.Job;
 import org.quartz.JobBuilder;
 import org.quartz.JobDetail;
 import org.quartz.Scheduler;
@@ -13,12 +14,18 @@ import org.telegram.telegrambots.longpolling.util.LongPollingSingleThreadUpdateC
 import org.telegram.telegrambots.meta.api.methods.pinnedmessages.PinChatMessage;
 import org.telegram.telegrambots.meta.api.methods.pinnedmessages.UnpinChatMessage;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.DeleteMessage;
+import org.telegram.telegrambots.meta.api.objects.LinkPreviewOptions;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.message.Message;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardRow;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.meta.generics.TelegramClient;
 
 import com.example.config.AppConfig;
+import com.example.meeting.Meeting;
 import com.example.sprint.SprintSchedule;
 
 import java.time.Duration;
@@ -26,7 +33,9 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -38,6 +47,7 @@ import java.util.stream.Collectors;
  *  - /sprint — shows current sprint and its reminder days
  *  - /test   — previews the next reminder (pinned for a few minutes); works only in the target chat
  *  - /test start — same for the sprint planning day warning
+ *  - /test daily|planning|review — previews a meeting reminder (deleted after a few minutes)
  */
 public class ReminderBot implements LongPollingSingleThreadUpdateConsumer {
 
@@ -77,6 +87,10 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer {
                         log.info("Ignored /test from chat {} (target chat is {})", chatId, config.chatId());
                         return;
                     }
+                    if (!arg.isEmpty() && !arg.equalsIgnoreCase("start")) {
+                        testMeeting(chatId, arg);
+                        return;
+                    }
                     boolean start = arg.equalsIgnoreCase("start");
                     LocalDate day = start ? nextPlanningDay() : nextReminderDay();
                     String text = start ? sprintStartText(day) : reminderText(day);
@@ -91,6 +105,42 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer {
             }
         } catch (RuntimeException e) {
             log.error("Failed to handle update in chat {}", chatId, e);
+        }
+    }
+
+    private void testMeeting(long chatId, String arg) {
+        Meeting.Type type = Meeting.Type.byKey(arg);
+        Meeting meeting = type != null ? config.meetings().get(type) : null;
+        if (meeting == null) {
+            String known = config.meetings().keySet().stream().map(Meeting.Type::key).collect(Collectors.joining(", "));
+            send(chatId, "Использование: /test, /test start, /test &lt;встреча&gt;\nВстречи: " + known);
+            return;
+        }
+        sendMeetingReminder(chatId, meeting);
+    }
+
+    /** Sends a meeting reminder with a button to join; deletes it after meeting.delete-after-minutes. */
+    public void sendMeetingReminder(long chatId, Meeting meeting) {
+        String text = ReminderTexts.meeting(meeting, config.meetingTeam(), config.meetingRemindBefore());
+        InlineKeyboardMarkup joinButton = InlineKeyboardMarkup.builder()
+                .keyboardRow(new InlineKeyboardRow(InlineKeyboardButton.builder()
+                        .text("🎥 Подключиться")
+                        .url(meeting.room())
+                        .build()))
+                .build();
+
+        SendMessage msg = SendMessage.builder()
+                .chatId(String.valueOf(chatId))
+                .text(text)
+                .parseMode("HTML")
+                .linkPreviewOptions(LinkPreviewOptions.builder().isDisabled(true).build())
+                .replyMarkup(joinButton)
+                .build();
+        try {
+            int messageId = client.execute(msg).getMessageId();
+            scheduleMessageJob(DeleteJob.class, "delete", chatId, messageId, config.meetingDeleteAfter());
+        } catch (TelegramApiException e) {
+            throw new RuntimeException("Failed to send meeting reminder", e);
         }
     }
 
@@ -136,8 +186,25 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer {
         return "🏃 <b>Спринт " + DATE.format(sprint.start()) + " — " + DATE.format(sprint.end()) + "</b>\n"
                 + "⛔ Планирование, задачи не закрываем: " + planning + " (" + config.sprintStartTime() + zone + ")\n"
                 + "⏰ Напоминания (" + config.reminderTime() + zone + "): " + days + "\n"
+                + meetingsInfo(sprint)
                 + "Следующее напоминание: " + DATE.format(nextReminderDay()) + "\n"
                 + "Следующее планирование: " + DATE.format(nextPlanningDay());
+    }
+
+    private String meetingsInfo(SprintSchedule.Sprint sprint) {
+        StringBuilder sb = new StringBuilder();
+        for (Meeting meeting : config.meetings().values()) {
+            List<String> days = new ArrayList<>();
+            for (LocalDate d = sprint.start(); !d.isAfter(sprint.end()); d = d.plusDays(1)) {
+                if (meeting.type().occursOn(sprints, d)) {
+                    days.add(DATE.format(d));
+                }
+            }
+            sb.append(meeting.type().emoji()).append(' ').append(meeting.type().title())
+                    .append(" (").append(meeting.time()).append(' ').append(config.zoneLabel()).append("): ")
+                    .append(days.isEmpty() ? "—" : String.join(", ", days)).append('\n');
+        }
+        return sb.toString();
     }
 
     /** "/test@my_bot" -> "/test" */
@@ -188,16 +255,30 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer {
         }
     }
 
+    public void deleteMessage(long chatId, int messageId) {
+        try {
+            client.execute(DeleteMessage.builder()
+                    .chatId(String.valueOf(chatId))
+                    .messageId(messageId)
+                    .build());
+            log.info("Deleted: chatId={}, messageId={}", chatId, messageId);
+        } catch (TelegramApiException e) {
+            log.error("Failed to delete: chatId={}, messageId={}", chatId, messageId, e);
+        }
+    }
+
     public void sendPinAndAutoUnpin(long chatId, String text, Duration pinDuration) {
         int messageId = sendAndGetMessageId(chatId, text);
         pinMessage(chatId, messageId);
-        scheduleUnpin(chatId, messageId, pinDuration);
+        scheduleMessageJob(UnpinJob.class, "unpin", chatId, messageId, pinDuration);
     }
 
-    private void scheduleUnpin(long chatId, int messageId, Duration after) {
-        String key = "unpin_" + chatId + "_" + messageId;
+    /** Runs a one-off job (unpin, delete) for the message after the given delay. */
+    private void scheduleMessageJob(Class<? extends Job> jobClass, String action,
+                                    long chatId, int messageId, Duration after) {
+        String key = action + "_" + chatId + "_" + messageId;
 
-        JobDetail unpinJob = JobBuilder.newJob(UnpinJob.class)
+        JobDetail job = JobBuilder.newJob(jobClass)
                 .withIdentity(key)
                 .usingJobData("chatId", chatId)
                 .usingJobData("messageId", messageId)
@@ -211,10 +292,10 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer {
                 .build();
 
         try {
-            scheduler.scheduleJob(unpinJob, trigger);
-            log.info("Unpin scheduled in {}: chatId={}, messageId={}", after, chatId, messageId);
+            scheduler.scheduleJob(job, trigger);
+            log.info("{} scheduled in {}: chatId={}, messageId={}", action, after, chatId, messageId);
         } catch (SchedulerException e) {
-            throw new RuntimeException("Failed to schedule unpin", e);
+            throw new RuntimeException("Failed to schedule " + action, e);
         }
     }
 }

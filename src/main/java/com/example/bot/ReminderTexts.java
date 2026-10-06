@@ -1,7 +1,9 @@
 package com.example.bot;
 
+import com.example.meeting.Meeting;
 import com.example.sprint.SprintSchedule.Sprint;
 
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -139,6 +141,15 @@ public final class ReminderTexts {
         return SPRINT_START_HEADER
                 + SPRINT_START.get(Math.floorMod(sprint.number(), SPRINT_START.size()))
                 + SPRINT_START_FOOTER.formatted(escapeHtml(scrumMaster));
+    }
+
+    /** Short meeting reminder: no jokes, just what / when / where. */
+    public static String meeting(Meeting meeting, String team, Duration before) {
+        Meeting.Type type = meeting.type();
+        return type.emoji() + " <b>Через " + before.toMinutes() + " мин — " + type.title() + "</b>\n"
+                + "👥 Команда " + escapeHtml(team) + "\n"
+                + "🕙 Начало в " + meeting.time() + "\n"
+                + "🔗 " + escapeHtml(meeting.room());
     }
 
     private static String escapeHtml(String s) {

@@ -1,5 +1,7 @@
 package com.example.config;
 
+import com.example.meeting.Meeting;
+
 import java.io.IOException;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
@@ -10,6 +12,8 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.util.Collections;
+import java.util.EnumMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.function.Function;
@@ -35,20 +39,34 @@ public record AppConfig(
         int sprintLengthDays,
         String scrumMaster,
         Duration testPinDuration,
+        String meetingTeam,
+        Duration meetingRemindBefore,
+        Duration meetingDeleteAfter,
+        /** Enabled meetings only (those with a room set). */
+        Map<Meeting.Type, Meeting> meetings,
         Path source
 ) {
 
     private static final String DEFAULT_FILE = "config.properties";
 
-    private static final Map<String, String> DEFAULTS = Map.of(
-            "timezone", "Europe/Moscow",
-            "reminder.time", "16:30",
-            "sprint-start.time", "10:00",
-            "unpin.time", "23:59",
-            "sprint.anchor", "2026-10-07",
-            "sprint.length-days", "14",
-            "scrum-master", "@vsugonyaev",
-            "test.pin-minutes", "5"
+    private static final Map<String, String> DEFAULTS = Map.ofEntries(
+            Map.entry("timezone", "Europe/Moscow"),
+            Map.entry("reminder.time", "16:30"),
+            Map.entry("sprint-start.time", "10:00"),
+            Map.entry("unpin.time", "23:59"),
+            Map.entry("sprint.anchor", "2026-10-07"),
+            Map.entry("sprint.length-days", "14"),
+            Map.entry("scrum-master", "@vsugonyaev"),
+            Map.entry("test.pin-minutes", "5"),
+            Map.entry("meeting.team", "СУБО2_1-STRLPL"),
+            Map.entry("meeting.remind-before-minutes", "5"),
+            Map.entry("meeting.delete-after-minutes", "5"),
+            Map.entry("meeting.planning.time", "10:00"),
+            Map.entry("meeting.planning.room", "https://dion.vc/event/mestnikovat"),
+            Map.entry("meeting.daily.time", "10:00"),
+            Map.entry("meeting.daily.room", "https://dion.vc/event/mestnikovat"),
+            Map.entry("meeting.review.time", "10:00"),
+            Map.entry("meeting.review.room", "https://dion.vc/event/ptohov")
     );
 
     private static final Map<String, String> ENV_OVERRIDES = Map.of(
@@ -92,8 +110,29 @@ public record AppConfig(
                 required(props, "sprint.length-days", AppConfig::positiveInt),
                 required(props, "scrum-master", Function.identity()),
                 required(props, "test.pin-minutes", v -> Duration.ofMinutes(positiveInt(v))),
+                required(props, "meeting.team", Function.identity()),
+                required(props, "meeting.remind-before-minutes", v -> Duration.ofMinutes(positiveInt(v))),
+                required(props, "meeting.delete-after-minutes", v -> Duration.ofMinutes(positiveInt(v))),
+                meetings(props),
                 fileFound ? path.toAbsolutePath() : null
         );
+    }
+
+    /** meeting.&lt;type&gt;.room / meeting.&lt;type&gt;.time; an empty room disables the meeting. */
+    private static Map<Meeting.Type, Meeting> meetings(Properties props) {
+        Map<Meeting.Type, Meeting> result = new EnumMap<>(Meeting.Type.class);
+        for (Meeting.Type type : Meeting.Type.values()) {
+            String prefix = "meeting." + type.key() + ".";
+            String room = props.getProperty(prefix + "room", "").trim();
+            if (room.isEmpty()) {
+                continue;
+            }
+            if (!room.startsWith("https://") && !room.startsWith("http://")) {
+                throw new IllegalStateException("Invalid value for '" + prefix + "room': must be a link, got " + room);
+            }
+            result.put(type, new Meeting(type, required(props, prefix + "time", LocalTime::parse), room));
+        }
+        return Collections.unmodifiableMap(result);
     }
 
     public LocalDate today() {
@@ -142,6 +181,8 @@ public record AppConfig(
                 + ", sprintStartTime=" + sprintStartTime + ", reminderTime=" + reminderTime
                 + ", unpinTime=" + unpinTime + ", sprintAnchor=" + sprintAnchor
                 + ", sprintLengthDays=" + sprintLengthDays + ", scrumMaster=" + scrumMaster
-                + ", testPinDuration=" + testPinDuration + "]";
+                + ", testPinDuration=" + testPinDuration
+                + ", meetingTeam=" + meetingTeam + ", meetingRemindBefore=" + meetingRemindBefore
+                + ", meetingDeleteAfter=" + meetingDeleteAfter + ", meetings=" + meetings.values() + "]";
     }
 }
