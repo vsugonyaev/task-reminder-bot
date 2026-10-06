@@ -49,6 +49,9 @@ public record AppConfig(
         Duration meetingDeleteAfter,
         /** Enabled meetings only (those with a room set). */
         Map<Meeting.Type, Meeting> meetings,
+        Duration helpDeleteAfter,
+        /** Artifact commands on/off; when off the DB is not opened and only reminders work. */
+        boolean artifactsEnabled,
         Path artifactsDbPath,
         List<String> artifactTypes,
         List<String> epicKeyPrefixes,
@@ -81,6 +84,8 @@ public record AppConfig(
             Map.entry("meeting.daily.room", "https://dion.vc/event/mestnikovat"),
             Map.entry("meeting.review.time", "10:00"),
             Map.entry("meeting.review.room", "https://dion.vc/event/ptohov"),
+            Map.entry("help.delete-after-minutes", "5"),
+            Map.entry("artifacts.enabled", "false"),
             Map.entry("artifacts.db-path", "artifacts.db"),
             Map.entry("artifacts.types", "SA, BA, Макеты, ТПиС, ПТР, ПМИ, ПСИ, ТКР, ТИС, АР, АИС, Тест-план к4"),
             Map.entry("artifacts.epic-key-prefixes", "STRLPL, STRLPDML"),
@@ -137,6 +142,8 @@ public record AppConfig(
                 required(props, "meeting.remind-before-minutes", v -> Duration.ofMinutes(positiveInt(v))),
                 required(props, "meeting.delete-after-minutes", v -> Duration.ofMinutes(positiveInt(v))),
                 meetings(props),
+                required(props, "help.delete-after-minutes", v -> Duration.ofMinutes(positiveInt(v))),
+                required(props, "artifacts.enabled", AppConfig::bool),
                 required(props, "artifacts.db-path", Path::of),
                 required(props, "artifacts.types", AppConfig::list),
                 required(props, "artifacts.epic-key-prefixes", AppConfig::list),
@@ -228,6 +235,14 @@ public record AppConfig(
         }
     }
 
+    private static boolean bool(String value) {
+        return switch (value.toLowerCase(java.util.Locale.ROOT)) {
+            case "true", "yes", "on", "1" -> true;
+            case "false", "no", "off", "0" -> false;
+            default -> throw new IllegalArgumentException("expected true or false");
+        };
+    }
+
     /** "a, b ,c" -> [a, b, c]; must not be empty or contain duplicates. */
     private static List<String> list(String value) {
         List<String> items = Arrays.stream(value.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList();
@@ -259,6 +274,7 @@ public record AppConfig(
                 + ", testPinDuration=" + testPinDuration
                 + ", meetingTeam=" + meetingTeam + ", meetingRemindBefore=" + meetingRemindBefore
                 + ", meetingDeleteAfter=" + meetingDeleteAfter + ", meetings=" + meetings.values()
+                + ", helpDeleteAfter=" + helpDeleteAfter + ", artifactsEnabled=" + artifactsEnabled
                 + ", artifactsDbPath=" + artifactsDbPath + ", artifactTypes=" + artifactTypes
                 + ", epicKeyPrefixes=" + epicKeyPrefixes + ", artifactResultTtl=" + artifactResultTtl
                 + ", artifactDialogTimeout=" + artifactDialogTimeout

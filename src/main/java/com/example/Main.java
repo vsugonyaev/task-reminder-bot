@@ -43,7 +43,11 @@ public class Main {
                 config.sprintAnchor(), config.sprintLengthDays(), new ProductionCalendar());
         Scheduler scheduler = StdSchedulerFactory.getDefaultScheduler();
 
-        ArtifactRepository artifactRepository = new ArtifactRepository(config.artifactsDbPath(), config.chatId());
+        // Artifacts are switched off by default (artifacts.enabled) — then only reminders work and no DB is opened
+        ArtifactRepository artifactRepository = config.artifactsEnabled()
+                ? new ArtifactRepository(config.artifactsDbPath(), config.chatId())
+                : null;
+        log.info("Artifacts: {}", config.artifactsEnabled() ? "enabled" : "disabled");
         ReminderBot bot = new ReminderBot(new OkHttpTelegramClient(config.botToken()), scheduler, config, sprints,
                 artifactRepository);
         scheduler.getContext().put("bot", bot);
@@ -74,7 +78,9 @@ public class Main {
                 scheduler.shutdown();
                 botsApplication.close();
                 bot.shutdown();
-                artifactRepository.close();
+                if (artifactRepository != null) {
+                    artifactRepository.close();
+                }
             } catch (Exception e) {
                 log.error("Error during shutdown", e);
             }

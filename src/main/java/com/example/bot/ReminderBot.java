@@ -30,6 +30,7 @@ import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.meta.generics.TelegramClient;
 
 import com.example.access.AccessControl;
+import com.example.access.Permission;
 import com.example.artifacts.ArtifactDialogs;
 import com.example.artifacts.ArtifactRepository;
 import com.example.artifacts.ChatApi;
@@ -45,6 +46,8 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.EnumSet;
+import java.util.Set;
 import java.util.List;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -53,6 +56,7 @@ import java.util.stream.Collectors;
  * Minimal Telegram bot for scheduled reminders.
  *
  * Commands:
+ *  - /help   — what the bot does and its commands (tailored to the chat and the user's rights)
  *  - /chatid — reveals chatId of any chat (needed to configure TG_CHAT_ID)
  *  - /sprint — shows current sprint and its reminder days
  *  - /test   — previews the next reminder (pinned for a few minutes); works only in test chats, never in the work chat
@@ -74,8 +78,12 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
     private final AppConfig config;
     private final SprintSchedule sprints;
     private final AccessControl access;
+    /** Null when artifacts are disabled (artifacts.enabled=false): only reminders work then. */
     private final ArtifactDialogs artifacts;
 
+    /**
+     * @param artifactRepository null — artifact features are disabled
+     */
     public ReminderBot(TelegramClient client, Scheduler scheduler, AppConfig config, SprintSchedule sprints,
                        ArtifactRepository artifactRepository) {
         this.client = client;
@@ -83,7 +91,7 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
         this.config = config;
         this.sprints = sprints;
         this.access = new AccessControl(client, config.accessRules());
-        this.artifacts = new ArtifactDialogs(this, artifactRepository,
+        this.artifacts = artifactRepository == null ? null : new ArtifactDialogs(this, artifactRepository,
                 new EpicMatcher(config.epicKeyPrefixes()), config.artifactTypes(),
                 config.artifactResultTtl(), config.artifactDialogTimeout(), access, config.testChatIds());
     }
@@ -92,21 +100,28 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
         return config.testChatIds().contains(chatId);
     }
 
-    /** Startup checks of the work chat settings (logged as warnings). */
+    /** Startup checks of the work chat settings (logged as warnings); tags matter only for artifacts. */
     public void checkChatSettings() {
-        access.checkChatSettings(config.chatId());
+        if (artifacts != null) {
+            access.checkChatSettings(config.chatId());
+        }
     }
 
     /** Shows bot commands in the "/" menu of the work chat and test chats (test chats also get test commands). */
     public void registerCommands() {
         List<BotCommand> work = new ArrayList<>();
+        work.add(new BotCommand("help", "Что умеет бот"));
         work.add(new BotCommand("sprint", "Даты спринта, напоминания и встречи"));
-        ArtifactDialogs.COMMANDS.forEach((cmd, description) -> work.add(new BotCommand(cmd.substring(1), description)));
+        if (artifacts != null) {
+            ArtifactDialogs.COMMANDS.forEach((cmd, description) -> work.add(new BotCommand(cmd.substring(1), description)));
+        }
         registerCommands(config.chatId(), work);
 
         List<BotCommand> test = new ArrayList<>(work);
         test.add(new BotCommand("test", "Тест: напоминание (start | daily | planning | review)"));
-        test.add(new BotCommand(ArtifactDialogs.CLEANUP_COMMAND.substring(1), "Удалить данные, созданные в этом чате"));
+        if (artifacts != null) {
+            test.add(new BotCommand(ArtifactDialogs.CLEANUP_COMMAND.substring(1), "Удалить данные, созданные в этом чате"));
+        }
         config.testChatIds().forEach(chatId -> registerCommands(chatId, test));
     }
 
@@ -122,14 +137,19 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
     }
 
     public void shutdown() {
-        artifacts.close();
+        if (artifacts != null) {
+            artifacts.close();
+        }
     }
 
     @Override
     public void consume(Update update) {
         try {
             if (update.hasCallbackQuery()) {
-                artifacts.onCallback(update.getCallbackQuery());
+                // Inline buttons with callbacks exist only in artifact dialogs
+                if (artifacts != null) {
+                    artifacts.onCallback(update.getCallbackQuery());
+                }
             } else if (update.hasMessage() && update.getMessage().hasText()) {
                 onMessage(update.getMessage());
             }
@@ -144,20 +164,19 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
         String arg = parts.length > 1 ? parts[1].trim() : "";
         String command = parseCommand(parts[0]);
 
-        boolean artifactCommand = ArtifactDialogs.COMMANDS.containsKey(command)
-                && (chatId == config.chatId() || isTestChat(chatId));
-        boolean cleanupCommand = ArtifactDialogs.CLEANUP_COMMAND.equals(command) && isTestChat(chatId);
-        if (artifactCommand || cleanupCommand) {
-            if (message.getFrom() != null) {
+        if (ArtifactDialogs.COMMANDS.containsKey(command) || ArtifactDialogs.CLEANUP_COMMAND.equals(command)) {
+            boolean allowedChat = ArtifactDialogs.CLEANUP_COMMAND.equals(command)
+                    ? isTestChat(chatId)
+                    : chatId == config.chatId() || isTestChat(chatId);
+            if (artifacts != null && allowedChat && message.getFrom() != null) {
                 artifacts.onCommand(command, chatId, message.getFrom(), message.getMessageId());
             }
             return;
         }
-        if (ArtifactDialogs.COMMANDS.containsKey(command) || ArtifactDialogs.CLEANUP_COMMAND.equals(command)) {
-            return;
-        }
-        if (!command.startsWith("/") && message.getFrom() != null) {
-            artifacts.onText(chatId, message.getFrom(), message.getMessageId(), message.getText());
+        if (!command.startsWith("/")) {
+            if (artifacts != null && message.getFrom() != null) {
+                artifacts.onText(chatId, message.getFrom(), message.getMessageId(), message.getText());
+            }
             return;
         }
 
@@ -166,6 +185,8 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
                 case "/chatid" -> send(chatId, "chatId: " + chatId);
 
                 case "/sprint" -> send(chatId, sprintInfo());
+
+                case "/help" -> help(message);
 
                 case "/test" -> {
                     if (!isTestChat(chatId)) {
@@ -190,6 +211,30 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
             }
         } catch (RuntimeException e) {
             log.error("Failed to handle update in chat {}", chatId, e);
+        }
+    }
+
+    /** In work/test chats shows the user's rights and cleans up after itself; elsewhere — general help. */
+    private void help(Message message) {
+        long chatId = message.getChatId();
+        HelpText.ChatKind kind = chatId == config.chatId() ? HelpText.ChatKind.WORK
+                : isTestChat(chatId) ? HelpText.ChatKind.TEST
+                : HelpText.ChatKind.OTHER;
+
+        Set<Permission> rights = null;
+        if (artifacts != null && kind != HelpText.ChatKind.OTHER && message.getFrom() != null) {
+            rights = EnumSet.noneOf(Permission.class);
+            for (Permission p : Permission.values()) {
+                if (access.allowed(chatId, message.getFrom().getId(), p)) {
+                    rights.add(p);
+                }
+            }
+        }
+
+        int helpId = send(chatId, HelpText.build(config, kind, artifacts != null, rights), null);
+        if (kind != HelpText.ChatKind.OTHER) {
+            deleteLater(chatId, helpId, config.helpDeleteAfter());
+            deleteLater(chatId, message.getMessageId(), config.helpDeleteAfter());
         }
     }
 
