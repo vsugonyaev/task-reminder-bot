@@ -15,3 +15,7 @@ id_*
 
 # Local config with secrets
 config.properties
+
+# Artifacts database
+*.db
+*.db-journal

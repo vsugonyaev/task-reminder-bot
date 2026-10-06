@@ -1,5 +1,6 @@
 package com.example;
 
+import com.example.artifacts.ArtifactRepository;
 import com.example.bot.MeetingJob;
 import com.example.bot.ReminderBot;
 import com.example.bot.ReminderJob;
@@ -42,13 +43,16 @@ public class Main {
                 config.sprintAnchor(), config.sprintLengthDays(), new ProductionCalendar());
         Scheduler scheduler = StdSchedulerFactory.getDefaultScheduler();
 
-        ReminderBot bot = new ReminderBot(new OkHttpTelegramClient(config.botToken()), scheduler, config, sprints);
+        ArtifactRepository artifactRepository = new ArtifactRepository(config.artifactsDbPath());
+        ReminderBot bot = new ReminderBot(new OkHttpTelegramClient(config.botToken()), scheduler, config, sprints,
+                artifactRepository);
         scheduler.getContext().put("bot", bot);
         scheduler.getContext().put("sprints", sprints);
         scheduler.getContext().put("config", config);
 
         TelegramBotsLongPollingApplication botsApplication = new TelegramBotsLongPollingApplication();
         botsApplication.registerBot(config.botToken(), bot);
+        bot.registerCommands();
 
         // Both jobs fire every day and decide themselves whether today is their day
         scheduleDaily(scheduler, ReminderJob.class, "reminder", config.reminderTime(), config);
@@ -68,6 +72,8 @@ public class Main {
             try {
                 scheduler.shutdown();
                 botsApplication.close();
+                bot.shutdown();
+                artifactRepository.close();
             } catch (Exception e) {
                 log.error("Error during shutdown", e);
             }

@@ -14,7 +14,12 @@ import org.telegram.telegrambots.longpolling.util.LongPollingSingleThreadUpdateC
 import org.telegram.telegrambots.meta.api.methods.pinnedmessages.PinChatMessage;
 import org.telegram.telegrambots.meta.api.methods.pinnedmessages.UnpinChatMessage;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
+import org.telegram.telegrambots.meta.api.methods.commands.SetMyCommands;
 import org.telegram.telegrambots.meta.api.methods.updatingmessages.DeleteMessage;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText;
+import org.telegram.telegrambots.meta.api.objects.commands.BotCommand;
+import org.telegram.telegrambots.meta.api.objects.commands.scope.BotCommandScopeChat;
 import org.telegram.telegrambots.meta.api.objects.LinkPreviewOptions;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.message.Message;
@@ -24,6 +29,10 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKe
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.meta.generics.TelegramClient;
 
+import com.example.artifacts.ArtifactDialogs;
+import com.example.artifacts.ArtifactRepository;
+import com.example.artifacts.ChatApi;
+import com.example.artifacts.EpicMatcher;
 import com.example.config.AppConfig;
 import com.example.meeting.Meeting;
 import com.example.sprint.SprintSchedule;
@@ -48,36 +57,83 @@ import java.util.stream.Collectors;
  *  - /test   — previews the next reminder (pinned for a few minutes); works only in the target chat
  *  - /test start — same for the sprint planning day warning
  *  - /test daily|planning|review — previews a meeting reminder (deleted after a few minutes)
+ *  - artifact commands — see {@link ArtifactDialogs}; work only in the target chat
  */
-public class ReminderBot implements LongPollingSingleThreadUpdateConsumer {
+public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatApi {
 
     private static final Logger log = LoggerFactory.getLogger(ReminderBot.class);
 
     private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("dd.MM");
+    private static final LinkPreviewOptions NO_PREVIEW = LinkPreviewOptions.builder().isDisabled(true).build();
 
     private final TelegramClient client;
     private final Scheduler scheduler;
     private final AppConfig config;
     private final SprintSchedule sprints;
+    private final ArtifactDialogs artifacts;
 
-    public ReminderBot(TelegramClient client, Scheduler scheduler, AppConfig config, SprintSchedule sprints) {
+    public ReminderBot(TelegramClient client, Scheduler scheduler, AppConfig config, SprintSchedule sprints,
+                       ArtifactRepository artifactRepository) {
         this.client = client;
         this.scheduler = scheduler;
         this.config = config;
         this.sprints = sprints;
+        this.artifacts = new ArtifactDialogs(this, artifactRepository,
+                new EpicMatcher(config.epicKeyPrefixes()), config.artifactTypes(),
+                config.artifactResultTtl(), config.artifactDialogTimeout());
+    }
+
+    /** Shows bot commands in the "/" menu of the target chat. */
+    public void registerCommands() {
+        List<BotCommand> commands = new ArrayList<>();
+        commands.add(new BotCommand("sprint", "Даты спринта, напоминания и встречи"));
+        ArtifactDialogs.COMMANDS.forEach((cmd, description) -> commands.add(new BotCommand(cmd.substring(1), description)));
+        try {
+            client.execute(SetMyCommands.builder()
+                    .commands(commands)
+                    .scope(new BotCommandScopeChat(String.valueOf(config.chatId())))
+                    .build());
+        } catch (TelegramApiException e) {
+            log.warn("Failed to register bot commands: {}", e.getMessage());
+        }
+    }
+
+    public void shutdown() {
+        artifacts.close();
     }
 
     @Override
     public void consume(Update update) {
-        if (!update.hasMessage() || !update.getMessage().hasText()) {
+        try {
+            if (update.hasCallbackQuery()) {
+                artifacts.onCallback(update.getCallbackQuery());
+            } else if (update.hasMessage() && update.getMessage().hasText()) {
+                onMessage(update.getMessage());
+            }
+        } catch (RuntimeException e) {
+            log.error("Failed to handle update", e);
+        }
+    }
+
+    private void onMessage(Message message) {
+        long chatId = message.getChatId();
+        String[] parts = message.getText().trim().split("\\s+", 2);
+        String arg = parts.length > 1 ? parts[1].trim() : "";
+        String command = parseCommand(parts[0]);
+
+        if (ArtifactDialogs.COMMANDS.containsKey(command)) {
+            if (chatId == config.chatId() && message.getFrom() != null) {
+                artifacts.onCommand(command, chatId, message.getFrom(), message.getMessageId());
+            }
             return;
         }
-        long chatId = update.getMessage().getChatId();
-        String[] parts = update.getMessage().getText().trim().split("\\s+", 2);
-        String arg = parts.length > 1 ? parts[1].trim() : "";
+        if (!command.startsWith("/") && message.getFrom() != null) {
+            artifacts.onText(chatId, message.getFrom(), message.getMessageId(), message.getText());
+            return;
+        }
 
         try {
-            switch (parseCommand(parts[0])) {
+            switch (command) {
                 case "/chatid" -> send(chatId, "chatId: " + chatId);
 
                 case "/sprint" -> send(chatId, sprintInfo());
@@ -253,6 +309,65 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer {
         } catch (TelegramApiException e) {
             log.error("Failed to unpin: chatId={}, messageId={}", chatId, messageId, e);
         }
+    }
+
+    // --- ChatApi (used by artifact dialogs) ---
+
+    @Override
+    public int send(long chatId, String html, InlineKeyboardMarkup keyboard) {
+        try {
+            return client.execute(SendMessage.builder()
+                    .chatId(String.valueOf(chatId))
+                    .text(html)
+                    .parseMode("HTML")
+                    .linkPreviewOptions(NO_PREVIEW)
+                    .replyMarkup(keyboard)
+                    .build()).getMessageId();
+        } catch (TelegramApiException e) {
+            throw new RuntimeException("Failed to send message", e);
+        }
+    }
+
+    @Override
+    public void edit(long chatId, int messageId, String html, InlineKeyboardMarkup keyboard) {
+        try {
+            client.execute(EditMessageText.builder()
+                    .chatId(String.valueOf(chatId))
+                    .messageId(messageId)
+                    .text(html)
+                    .parseMode("HTML")
+                    .linkPreviewOptions(NO_PREVIEW)
+                    .replyMarkup(keyboard)
+                    .build());
+        } catch (TelegramApiException e) {
+            // Telegram rejects edits that change nothing — harmless
+            if (e.getMessage() == null || !e.getMessage().contains("message is not modified")) {
+                throw new RuntimeException("Failed to edit message", e);
+            }
+        }
+    }
+
+    @Override
+    public void delete(long chatId, int messageId) {
+        deleteMessage(chatId, messageId);
+    }
+
+    @Override
+    public void answerCallback(String callbackId, String text, boolean alert) {
+        try {
+            client.execute(AnswerCallbackQuery.builder()
+                    .callbackQueryId(callbackId)
+                    .text(text)
+                    .showAlert(alert)
+                    .build());
+        } catch (TelegramApiException e) {
+            log.warn("Failed to answer callback: {}", e.getMessage());
+        }
+    }
+
+    @Override
+    public void deleteLater(long chatId, int messageId, Duration after) {
+        scheduleMessageJob(DeleteJob.class, "delete", chatId, messageId, after);
     }
 
     public void deleteMessage(long chatId, int messageId) {

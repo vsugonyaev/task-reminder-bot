@@ -12,8 +12,11 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.function.Function;
@@ -44,6 +47,11 @@ public record AppConfig(
         Duration meetingDeleteAfter,
         /** Enabled meetings only (those with a room set). */
         Map<Meeting.Type, Meeting> meetings,
+        Path artifactsDbPath,
+        List<String> artifactTypes,
+        List<String> epicKeyPrefixes,
+        Duration artifactResultTtl,
+        Duration artifactDialogTimeout,
         Path source
 ) {
 
@@ -66,7 +74,12 @@ public record AppConfig(
             Map.entry("meeting.daily.time", "10:00"),
             Map.entry("meeting.daily.room", "https://dion.vc/event/mestnikovat"),
             Map.entry("meeting.review.time", "10:00"),
-            Map.entry("meeting.review.room", "https://dion.vc/event/ptohov")
+            Map.entry("meeting.review.room", "https://dion.vc/event/ptohov"),
+            Map.entry("artifacts.db-path", "artifacts.db"),
+            Map.entry("artifacts.types", "SA, BA, Макеты, ТПиС, ПТР, ПМИ, ПСИ, ТКР, ТИС, АР, АИС, Тест-план к4"),
+            Map.entry("artifacts.epic-key-prefixes", "STRLPL, STRLPDML"),
+            Map.entry("artifacts.result-delete-minutes", "5"),
+            Map.entry("artifacts.dialog-timeout-minutes", "10")
     );
 
     private static final Map<String, String> ENV_OVERRIDES = Map.of(
@@ -114,6 +127,11 @@ public record AppConfig(
                 required(props, "meeting.remind-before-minutes", v -> Duration.ofMinutes(positiveInt(v))),
                 required(props, "meeting.delete-after-minutes", v -> Duration.ofMinutes(positiveInt(v))),
                 meetings(props),
+                required(props, "artifacts.db-path", Path::of),
+                required(props, "artifacts.types", AppConfig::list),
+                required(props, "artifacts.epic-key-prefixes", AppConfig::list),
+                required(props, "artifacts.result-delete-minutes", v -> Duration.ofMinutes(positiveInt(v))),
+                required(props, "artifacts.dialog-timeout-minutes", v -> Duration.ofMinutes(positiveInt(v))),
                 fileFound ? path.toAbsolutePath() : null
         );
     }
@@ -165,6 +183,18 @@ public record AppConfig(
         }
     }
 
+    /** "a, b ,c" -> [a, b, c]; must not be empty or contain duplicates. */
+    private static List<String> list(String value) {
+        List<String> items = Arrays.stream(value.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList();
+        if (items.isEmpty()) {
+            throw new IllegalArgumentException("list is empty");
+        }
+        if (new HashSet<>(items).size() != items.size()) {
+            throw new IllegalArgumentException("list has duplicates");
+        }
+        return items;
+    }
+
     private static int positiveInt(String value) {
         int n = Integer.parseInt(value);
         if (n <= 0) {
@@ -183,6 +213,9 @@ public record AppConfig(
                 + ", sprintLengthDays=" + sprintLengthDays + ", scrumMaster=" + scrumMaster
                 + ", testPinDuration=" + testPinDuration
                 + ", meetingTeam=" + meetingTeam + ", meetingRemindBefore=" + meetingRemindBefore
-                + ", meetingDeleteAfter=" + meetingDeleteAfter + ", meetings=" + meetings.values() + "]";
+                + ", meetingDeleteAfter=" + meetingDeleteAfter + ", meetings=" + meetings.values()
+                + ", artifactsDbPath=" + artifactsDbPath + ", artifactTypes=" + artifactTypes
+                + ", epicKeyPrefixes=" + epicKeyPrefixes + ", artifactResultTtl=" + artifactResultTtl
+                + ", artifactDialogTimeout=" + artifactDialogTimeout + "]";
     }
 }
