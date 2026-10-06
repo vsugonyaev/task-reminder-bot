@@ -107,8 +107,6 @@ public final class ReminderTexts {
                     + "Последний шанс закрыть задачи с гордостью, а не с объяснительной 📝"
     );
 
-    private static final String SCRUM_MASTER = "@vsugonyaev";
-
     /** Sprint planning day warnings: red "stop" banner + quote, so they look nothing like regular reminders. */
     private static final String SPRINT_START_HEADER =
             "⛔⛔⛔⛔⛔⛔⛔⛔\n"
@@ -117,7 +115,7 @@ public final class ReminderTexts {
                     + "Первый день спринта — планирование. Ни одна задача сегодня не должна уйти в Done.\n\n";
 
     private static final String SPRINT_START_FOOTER =
-            "\n\n🆘 <b>Случайно закрыли?</b> Сразу пишите скраму " + SCRUM_MASTER + " — исправим, пока не поздно.";
+            "\n\n🆘 <b>Случайно закрыли?</b> Сразу пишите скраму %s — исправим, пока не поздно.";
 
     private static final List<String> SPRINT_START = List.of(
             "<blockquote>Закрыть задачу в первый день спринта — как съесть торт до того, как задуть свечи. "
@@ -137,10 +135,14 @@ public final class ReminderTexts {
 
     private ReminderTexts() {}
 
-    public static String sprintStart(Sprint sprint) {
+    public static String sprintStart(Sprint sprint, String scrumMaster) {
         return SPRINT_START_HEADER
                 + SPRINT_START.get(Math.floorMod(sprint.number(), SPRINT_START.size()))
-                + SPRINT_START_FOOTER;
+                + SPRINT_START_FOOTER.formatted(escapeHtml(scrumMaster));
+    }
+
+    private static String escapeHtml(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     public static String regular(Sprint sprint, LocalDate date) {

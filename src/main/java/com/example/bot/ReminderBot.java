@@ -18,6 +18,7 @@ import org.telegram.telegrambots.meta.api.objects.message.Message;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.meta.generics.TelegramClient;
 
+import com.example.config.AppConfig;
 import com.example.sprint.SprintSchedule;
 
 import java.time.Duration;
@@ -26,6 +27,7 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Date;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 /**
@@ -34,32 +36,25 @@ import java.util.stream.Collectors;
  * Commands:
  *  - /chatid — reveals chatId of any chat (needed to configure TG_CHAT_ID)
  *  - /sprint — shows current sprint and its reminder days
- *  - /test   — previews the next reminder (pinned for 5 minutes); works only in the target chat
+ *  - /test   — previews the next reminder (pinned for a few minutes); works only in the target chat
  *  - /test start — same for the sprint planning day warning
  */
 public class ReminderBot implements LongPollingSingleThreadUpdateConsumer {
 
     private static final Logger log = LoggerFactory.getLogger(ReminderBot.class);
 
-    private static final Duration TEST_PIN_DURATION = Duration.ofMinutes(5);
-
     private static final DateTimeFormatter DATE = DateTimeFormatter.ofPattern("dd.MM");
 
     private final TelegramClient client;
     private final Scheduler scheduler;
-    private final long targetChatId;
+    private final AppConfig config;
     private final SprintSchedule sprints;
-    private final LocalTime reminderTime;
-    private final LocalTime sprintStartTime;
 
-    public ReminderBot(TelegramClient client, Scheduler scheduler, long targetChatId,
-                       SprintSchedule sprints, LocalTime reminderTime, LocalTime sprintStartTime) {
+    public ReminderBot(TelegramClient client, Scheduler scheduler, AppConfig config, SprintSchedule sprints) {
         this.client = client;
         this.scheduler = scheduler;
-        this.targetChatId = targetChatId;
+        this.config = config;
         this.sprints = sprints;
-        this.reminderTime = reminderTime;
-        this.sprintStartTime = sprintStartTime;
     }
 
     @Override
@@ -78,17 +73,18 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer {
                 case "/sprint" -> send(chatId, sprintInfo());
 
                 case "/test" -> {
-                    if (chatId != targetChatId) {
-                        log.info("Ignored /test from chat {} (target chat is {})", chatId, targetChatId);
+                    if (chatId != config.chatId()) {
+                        log.info("Ignored /test from chat {} (target chat is {})", chatId, config.chatId());
                         return;
                     }
                     boolean start = arg.equalsIgnoreCase("start");
                     LocalDate day = start ? nextPlanningDay() : nextReminderDay();
-                    String text = start ? ReminderTexts.sprintStart(sprints.sprintOf(day)) : reminderText(day);
+                    String text = start ? sprintStartText(day) : reminderText(day);
+                    Duration pin = config.testPinDuration();
                     String msg = "🧪 <i>Тест: так будет выглядеть " + (start ? "предупреждение " : "напоминание ")
-                            + DATE.format(day) + ". Закреп снимется через "
-                            + TEST_PIN_DURATION.toMinutes() + " мин.</i>\n\n" + text;
-                    sendPinAndAutoUnpin(chatId, msg, TEST_PIN_DURATION);
+                            + DATE.format(day) + ". Закреп снимется через " + pin.toMinutes() + " мин.</i>\n\n"
+                            + text;
+                    sendPinAndAutoUnpin(chatId, msg, pin);
                 }
 
                 default -> { /* ничего */ }
@@ -98,24 +94,30 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer {
         }
     }
 
-    private String reminderText(LocalDate day) {
+    /** Text of the reminder to close tasks for the given day. */
+    public String reminderText(LocalDate day) {
         boolean lastDay = sprints.lastReminderDay(day).map(day::equals).orElse(false);
         return ReminderTexts.forDay(sprints.sprintOf(day), day, lastDay);
     }
 
+    /** Text of the planning day warning for the given day. */
+    public String sprintStartText(LocalDate day) {
+        return ReminderTexts.sprintStart(sprints.sprintOf(day), config.scrumMaster());
+    }
+
     /** Today if today's reminder is still ahead, otherwise the next reminder day. */
     private LocalDate nextReminderDay() {
-        return nextDay(reminderTime, sprints::isReminderDay);
+        return nextDay(config.reminderTime(), sprints::isReminderDay);
     }
 
     /** Same for the sprint planning day warning. */
     private LocalDate nextPlanningDay() {
-        return nextDay(sprintStartTime, sprints::isPlanningDay);
+        return nextDay(config.sprintStartTime(), sprints::isPlanningDay);
     }
 
-    private static LocalDate nextDay(LocalTime sendTime, java.util.function.Predicate<LocalDate> matches) {
-        LocalDate day = LocalDate.now(ReminderJob.ZONE);
-        if (!LocalTime.now(ReminderJob.ZONE).isBefore(sendTime)) {
+    private LocalDate nextDay(LocalTime sendTime, Predicate<LocalDate> matches) {
+        LocalDate day = LocalDate.now(config.zone());
+        if (!LocalTime.now(config.zone()).isBefore(sendTime)) {
             day = day.plusDays(1);
         }
         while (!matches.test(day)) {
@@ -125,14 +127,15 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer {
     }
 
     private String sprintInfo() {
-        SprintSchedule.Sprint sprint = sprints.sprintOf(LocalDate.now(ReminderJob.ZONE));
+        SprintSchedule.Sprint sprint = sprints.sprintOf(LocalDate.now(config.zone()));
         String planning = sprints.planningDay(sprint).map(DATE::format).orElse("—");
         String days = sprints.reminderDays(sprint).stream()
                 .map(DATE::format)
                 .collect(Collectors.joining(", "));
+        String zone = " " + config.zoneLabel();
         return "🏃 <b>Спринт " + DATE.format(sprint.start()) + " — " + DATE.format(sprint.end()) + "</b>\n"
-                + "⛔ Планирование, задачи не закрываем: " + planning + " (" + sprintStartTime + " МСК)\n"
-                + "⏰ Напоминания (" + reminderTime + " МСК): " + days + "\n"
+                + "⛔ Планирование, задачи не закрываем: " + planning + " (" + config.sprintStartTime() + zone + ")\n"
+                + "⏰ Напоминания (" + config.reminderTime() + zone + "): " + days + "\n"
                 + "Следующее напоминание: " + DATE.format(nextReminderDay()) + "\n"
                 + "Следующее планирование: " + DATE.format(nextPlanningDay());
     }

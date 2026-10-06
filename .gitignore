@@ -12,3 +12,6 @@ id_*
 *_ed25519.pub
 *deploy_key*
 .env
+
+# Local config with secrets
+config.properties
