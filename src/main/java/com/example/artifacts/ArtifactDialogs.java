@@ -1,5 +1,7 @@
 package com.example.artifacts;
 
+import com.example.access.Permission;
+import com.example.access.PermissionChecker;
 import com.example.util.Html;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -49,15 +52,18 @@ public class ArtifactDialogs implements AutoCloseable {
         COMMANDS.put("/artifacts_archive", "Артефакты архивных эпиков");
     }
 
+    /** Available only in test chats: permanently deletes artifact data created in the chat. */
+    public static final String CLEANUP_COMMAND = "/test_cleanup";
+
     private static final int PAGE_SIZE = 8;
     private static final int TYPES_PER_ROW = 3;
     private static final int MAX_BUTTON_TEXT = 48;
 
-    private enum Kind { ADD, EDIT, VIEW, VIEW_ARCHIVED, ARCHIVE }
+    private enum Kind { ADD, EDIT, VIEW, VIEW_ARCHIVED, ARCHIVE, CLEANUP }
 
     private enum Step {
         EPIC_SELECT, EPIC_CONFIRM, TYPE_SELECT, MODE_SELECT, REPLACE_SELECT, LINK_INPUT,
-        ARTIFACT_SELECT, ACTION_SELECT, DELETE_CONFIRM, ARCHIVE_CONFIRM
+        ARTIFACT_SELECT, ACTION_SELECT, DELETE_CONFIRM, ARCHIVE_CONFIRM, CLEANUP_CONFIRM
     }
 
     private static final class Session {
@@ -89,6 +95,8 @@ public class ArtifactDialogs implements AutoCloseable {
     }
 
     private final ChatApi chat;
+    private final PermissionChecker access;
+    private final Set<Long> testChatIds;
     private final ArtifactRepository repo;
     private final EpicMatcher matcher;
     private final List<String> types;
@@ -102,8 +110,10 @@ public class ArtifactDialogs implements AutoCloseable {
     });
 
     public ArtifactDialogs(ChatApi chat, ArtifactRepository repo, EpicMatcher matcher, List<String> types,
-                           Duration resultTtl, Duration timeout) {
+                           Duration resultTtl, Duration timeout, PermissionChecker access, Set<Long> testChatIds) {
         this.chat = chat;
+        this.testChatIds = Set.copyOf(testChatIds);
+        this.access = access;
         this.repo = repo;
         this.matcher = matcher;
         this.types = List.copyOf(types);
@@ -121,8 +131,22 @@ public class ArtifactDialogs implements AutoCloseable {
             case "/artifacts" -> Kind.VIEW;
             case "/artifacts_archive" -> Kind.VIEW_ARCHIVED;
             case "/epic_archive" -> Kind.ARCHIVE;
+            case "/test_cleanup" -> Kind.CLEANUP;
             default -> throw new IllegalArgumentException(command);
         };
+
+        boolean allowed = switch (kind) {
+            case ADD -> can(chatId, from, Permission.ARTIFACT_EDIT);
+            case EDIT -> can(chatId, from, Permission.ARTIFACT_EDIT) || can(chatId, from, Permission.ARTIFACT_DELETE);
+            case ARCHIVE -> can(chatId, from, Permission.EPIC_ARCHIVE);
+            case CLEANUP -> testChatIds.contains(chatId) && can(chatId, from, Permission.ARTIFACT_DELETE);
+            case VIEW, VIEW_ARCHIVED -> true;
+        };
+        if (!allowed) {
+            // Silently: a reply would let anyone spam the chat
+            chat.delete(chatId, messageId);
+            return;
+        }
 
         Session old = sessions.get(key(chatId, from.getId()));
         if (old != null) {
@@ -131,7 +155,24 @@ public class ArtifactDialogs implements AutoCloseable {
 
         Session s = new Session(kind, chatId, from);
         s.userMessages.add(messageId);
-        s.shownEpics = repo.epics(kind == Kind.VIEW_ARCHIVED);
+
+        if (kind == Kind.CLEANUP) {
+            ArtifactRepository.ChatDataStats stats = repo.chatDataStats(chatId);
+            if (stats.epics() == 0) {
+                finish(s, "🧹 В этом чате нет данных артефактов.");
+                return;
+            }
+            s.step = Step.CLEANUP_CONFIRM;
+            s.panelId = chat.send(chatId, "🧹 <b>Очистка тестовых данных</b>\n"
+                            + "Данные, созданные в этом чате: эпиков — " + stats.epics()
+                            + ", артефактов — " + stats.artifacts() + " (включая архивные и удалённые).\n\n"
+                            + "Удалить их безвозвратно? Данные рабочего чата не затрагиваются.",
+                    keyboard(row(button("🗑 Удалить тестовые данные", "yes"), cancelButton())));
+            sessions.put(key(chatId, s.userId), s);
+            return;
+        }
+
+        s.shownEpics = repo.epics(chatId, kind == Kind.VIEW_ARCHIVED);
 
         if (s.shownEpics.isEmpty() && kind != Kind.ADD) {
             finish(s, kind == Kind.VIEW_ARCHIVED
@@ -221,16 +262,16 @@ public class ArtifactDialogs implements AutoCloseable {
             }
             case "all" -> {
                 s.search = null;
-                s.shownEpics = repo.epics(s.kind == Kind.VIEW_ARCHIVED);
+                s.shownEpics = repo.epics(s.chatId, s.kind == Kind.VIEW_ARCHIVED);
                 s.page = 0;
                 s.step = Step.EPIC_SELECT;
                 renderEpicSelect(s);
             }
-            case "e" -> repo.epic(Long.parseLong(arg)).ifPresent(epic -> onEpicChosen(s, epic));
+            case "e" -> repo.epic(s.chatId, Long.parseLong(arg)).ifPresent(epic -> onEpicChosen(s, epic));
             case "new" -> {
                 EpicMatcher.ParsedEpic p = s.pendingEpic;
                 if (p != null) {
-                    Epic epic = repo.epicByKey(p.key()).orElseGet(() -> repo.createEpic(p.key(), p.name(), s.user));
+                    Epic epic = repo.epicByKey(s.chatId, p.key()).orElseGet(() -> repo.createEpic(s.chatId, p.key(), p.name(), s.user));
                     onEpicChosen(s, epic);
                 }
             }
@@ -243,6 +284,9 @@ public class ArtifactDialogs implements AutoCloseable {
                 askLink(s);
             }
             case "rep" -> {
+                if (!can(s, Permission.ARTIFACT_EDIT)) {
+                    return;
+                }
                 if (s.step == Step.ACTION_SELECT) {
                     askLink(s);
                     return;
@@ -267,12 +311,21 @@ public class ArtifactDialogs implements AutoCloseable {
                     }
                     s.type = a.get().type();
                     s.step = Step.ACTION_SELECT;
-                    render(s, header(s) + "Ссылка: " + linkTo(a.get().url()) + "\n\nЧто сделать?", keyboard(
-                            row(button("🔁 Заменить ссылку", "rep"), button("🗑 Удалить", "del")),
-                            row(cancelButton())));
+                    InlineKeyboardRow actions = new InlineKeyboardRow();
+                    if (can(s, Permission.ARTIFACT_EDIT)) {
+                        actions.add(button("🔁 Заменить ссылку", "rep"));
+                    }
+                    if (can(s, Permission.ARTIFACT_DELETE)) {
+                        actions.add(button("🗑 Удалить", "del"));
+                    }
+                    render(s, header(s) + "Ссылка: " + linkTo(a.get().url()) + "\n\nЧто сделать?",
+                            keyboard(actions, row(cancelButton())));
                 }
             }
             case "del" -> {
+                if (!can(s, Permission.ARTIFACT_DELETE)) {
+                    return;
+                }
                 s.step = Step.DELETE_CONFIRM;
                 Artifact a = repo.artifact(s.artifactId).orElseThrow();
                 render(s, header(s) + "Удалить ссылку " + linkTo(a.url()) + "?\n"
@@ -280,10 +333,15 @@ public class ArtifactDialogs implements AutoCloseable {
                         keyboard(row(button("🗑 Да, удалить", "yes"), cancelButton())));
             }
             case "yes" -> {
-                if (s.step == Step.DELETE_CONFIRM) {
+                if (s.step == Step.DELETE_CONFIRM && can(s, Permission.ARTIFACT_DELETE)) {
                     repo.deleteArtifact(s.artifactId, s.user);
                     finish(s, "🗑 <b>" + Html.escape(s.epic.title()) + "</b>\n" + Html.escape(s.type) + ": ссылка удалена");
-                } else if (s.step == Step.ARCHIVE_CONFIRM) {
+                } else if (s.step == Step.CLEANUP_CONFIRM && testChatIds.contains(s.chatId)
+                        && can(s, Permission.ARTIFACT_DELETE)) {
+                    ArtifactRepository.ChatDataStats deleted = repo.deleteChatData(s.chatId);
+                    finish(s, "🧹 Тестовые данные удалены: эпиков — " + deleted.epics()
+                            + ", артефактов — " + deleted.artifacts() + ".");
+                } else if (s.step == Step.ARCHIVE_CONFIRM && can(s, Permission.EPIC_ARCHIVE)) {
                     repo.archiveEpic(s.epic.id(), s.user);
                     finish(s, "📦 Эпик <b>" + Html.escape(s.epic.title()) + "</b> отправлен в архив.\n"
                             + "Документы по нему — в /artifacts_archive");
@@ -369,7 +427,7 @@ public class ArtifactDialogs implements AutoCloseable {
         EpicMatcher.ParsedEpic parsed = matcher.parse(text);
 
         if (s.kind == Kind.ADD && parsed != null) {
-            Optional<Epic> existing = repo.epicByKey(parsed.key());
+            Optional<Epic> existing = repo.epicByKey(s.chatId, parsed.key());
             if (existing.isPresent()) {
                 if (existing.get().archived()) {
                     s.notice = "🗄 Эпик " + parsed.key() + " в архиве — его документы смотрите в /artifacts_archive";
@@ -385,9 +443,9 @@ public class ArtifactDialogs implements AutoCloseable {
                 renderEpicSelect(s);
                 return;
             }
-            List<Epic> similar = matcher.similar(text, repo.epics(false));
+            List<Epic> similar = matcher.similar(text, repo.epics(s.chatId, false));
             if (similar.isEmpty()) {
-                onEpicChosen(s, repo.createEpic(parsed.key(), parsed.name(), s.user));
+                onEpicChosen(s, repo.createEpic(s.chatId, parsed.key(), parsed.name(), s.user));
                 return;
             }
             s.pendingEpic = parsed;
@@ -402,7 +460,7 @@ public class ArtifactDialogs implements AutoCloseable {
         }
 
         // Search within the list the dialog works with
-        List<Epic> base = repo.epics(s.kind == Kind.VIEW_ARCHIVED);
+        List<Epic> base = repo.epics(s.chatId, s.kind == Kind.VIEW_ARCHIVED);
         List<Epic> found = parsed != null
                 ? base.stream().filter(e -> e.key().equals(parsed.key())).toList()
                 : List.of();
@@ -438,6 +496,7 @@ public class ArtifactDialogs implements AutoCloseable {
             case VIEW -> "📂 <b>Артефакты эпика</b>\n" + hint;
             case VIEW_ARCHIVED -> "🗄 <b>Архив эпиков</b>\n" + hint;
             case ARCHIVE -> "📦 <b>Архивация эпика</b>\n" + hint;
+            case CLEANUP -> "🧹 <b>Очистка тестовых данных</b>";
         });
         if (s.search != null) {
             text.append("\n\n🔍 «").append(Html.escape(s.search)).append("»: ")
@@ -582,6 +641,14 @@ public class ArtifactDialogs implements AutoCloseable {
     }
 
     // ------------------------------------------------------------------ helpers
+
+    private boolean can(long chatId, User user, Permission permission) {
+        return access.allowed(chatId, user.getId(), permission);
+    }
+
+    private boolean can(Session s, Permission permission) {
+        return access.allowed(s.chatId, s.userId, permission);
+    }
 
     private List<Artifact> artifactsOfType(Session s) {
         return repo.artifacts(s.epic.id()).stream().filter(a -> a.type().equals(s.type)).toList();

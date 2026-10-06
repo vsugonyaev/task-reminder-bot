@@ -1,5 +1,6 @@
 package com.example.config;
 
+import com.example.access.Permission;
 import com.example.meeting.Meeting;
 
 import java.io.IOException;
@@ -19,6 +20,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.function.Function;
 
 /**
@@ -52,6 +54,10 @@ public record AppConfig(
         List<String> epicKeyPrefixes,
         Duration artifactResultTtl,
         Duration artifactDialogTimeout,
+        /** Chats where test commands (/test) work; never the work chat. */
+        Set<Long> testChatIds,
+        /** Permission -> tags allowed to use it; empty set — everyone. */
+        Map<Permission, Set<String>> accessRules,
         Path source
 ) {
 
@@ -79,7 +85,11 @@ public record AppConfig(
             Map.entry("artifacts.types", "SA, BA, Макеты, ТПиС, ПТР, ПМИ, ПСИ, ТКР, ТИС, АР, АИС, Тест-план к4"),
             Map.entry("artifacts.epic-key-prefixes", "STRLPL, STRLPDML"),
             Map.entry("artifacts.result-delete-minutes", "5"),
-            Map.entry("artifacts.dialog-timeout-minutes", "10")
+            Map.entry("artifacts.dialog-timeout-minutes", "10"),
+            Map.entry("telegram.test-chat-ids", ""),
+            Map.entry("access.artifact-edit", "SA, BA, Design, IT-Lead, QA, PO"),
+            Map.entry("access.artifact-delete", "IT-Lead, PO"),
+            Map.entry("access.epic-archive", "IT-Lead, PO")
     );
 
     private static final Map<String, String> ENV_OVERRIDES = Map.of(
@@ -112,7 +122,7 @@ public record AppConfig(
             }
         });
 
-        return new AppConfig(
+        AppConfig config = new AppConfig(
                 required(props, "telegram.token", Function.identity()),
                 required(props, "telegram.chat-id", Long::parseLong),
                 required(props, "timezone", ZoneId::of),
@@ -132,8 +142,43 @@ public record AppConfig(
                 required(props, "artifacts.epic-key-prefixes", AppConfig::list),
                 required(props, "artifacts.result-delete-minutes", v -> Duration.ofMinutes(positiveInt(v))),
                 required(props, "artifacts.dialog-timeout-minutes", v -> Duration.ofMinutes(positiveInt(v))),
+                testChatIds(props),
+                accessRules(props),
                 fileFound ? path.toAbsolutePath() : null
         );
+        if (config.testChatIds().contains(config.chatId())) {
+            String env = System.getenv("TG_CHAT_ID");
+            throw new IllegalStateException("telegram.test-chat-ids must not contain the work chat " + config.chatId()
+                    + (env != null && !env.isBlank()
+                    ? " (work chat is taken from env var TG_CHAT_ID, which overrides telegram.chat-id in the config)"
+                    : ""));
+        }
+        return config;
+    }
+
+    private static Set<Long> testChatIds(Properties props) {
+        Set<Long> ids = new HashSet<>();
+        for (String s : optionalList(props, "telegram.test-chat-ids")) {
+            try {
+                ids.add(Long.parseLong(s));
+            } catch (NumberFormatException e) {
+                throw new IllegalStateException("Invalid value for 'telegram.test-chat-ids': " + s, e);
+            }
+        }
+        return Set.copyOf(ids);
+    }
+
+    private static Map<Permission, Set<String>> accessRules(Properties props) {
+        Map<Permission, Set<String>> rules = new EnumMap<>(Permission.class);
+        for (Permission p : Permission.values()) {
+            rules.put(p, Set.copyOf(optionalList(props, "access." + p.key())));
+        }
+        return Collections.unmodifiableMap(rules);
+    }
+
+    private static List<String> optionalList(Properties props, String key) {
+        String value = props.getProperty(key, "");
+        return Arrays.stream(value.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList();
     }
 
     /** meeting.&lt;type&gt;.room / meeting.&lt;type&gt;.time; an empty room disables the meeting. */
@@ -216,6 +261,7 @@ public record AppConfig(
                 + ", meetingDeleteAfter=" + meetingDeleteAfter + ", meetings=" + meetings.values()
                 + ", artifactsDbPath=" + artifactsDbPath + ", artifactTypes=" + artifactTypes
                 + ", epicKeyPrefixes=" + epicKeyPrefixes + ", artifactResultTtl=" + artifactResultTtl
-                + ", artifactDialogTimeout=" + artifactDialogTimeout + "]";
+                + ", artifactDialogTimeout=" + artifactDialogTimeout
+                + ", testChatIds=" + testChatIds + ", accessRules=" + accessRules + "]";
     }
 }

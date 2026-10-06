@@ -43,7 +43,7 @@ public class Main {
                 config.sprintAnchor(), config.sprintLengthDays(), new ProductionCalendar());
         Scheduler scheduler = StdSchedulerFactory.getDefaultScheduler();
 
-        ArtifactRepository artifactRepository = new ArtifactRepository(config.artifactsDbPath());
+        ArtifactRepository artifactRepository = new ArtifactRepository(config.artifactsDbPath(), config.chatId());
         ReminderBot bot = new ReminderBot(new OkHttpTelegramClient(config.botToken()), scheduler, config, sprints,
                 artifactRepository);
         scheduler.getContext().put("bot", bot);
@@ -53,6 +53,7 @@ public class Main {
         TelegramBotsLongPollingApplication botsApplication = new TelegramBotsLongPollingApplication();
         botsApplication.registerBot(config.botToken(), bot);
         bot.registerCommands();
+        bot.checkChatSettings();
 
         // Both jobs fire every day and decide themselves whether today is their day
         scheduleDaily(scheduler, ReminderJob.class, "reminder", config.reminderTime(), config);

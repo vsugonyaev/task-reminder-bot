@@ -29,6 +29,7 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKe
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.meta.generics.TelegramClient;
 
+import com.example.access.AccessControl;
 import com.example.artifacts.ArtifactDialogs;
 import com.example.artifacts.ArtifactRepository;
 import com.example.artifacts.ChatApi;
@@ -54,10 +55,12 @@ import java.util.stream.Collectors;
  * Commands:
  *  - /chatid — reveals chatId of any chat (needed to configure TG_CHAT_ID)
  *  - /sprint — shows current sprint and its reminder days
- *  - /test   — previews the next reminder (pinned for a few minutes); works only in the target chat
+ *  - /test   — previews the next reminder (pinned for a few minutes); works only in test chats, never in the work chat
  *  - /test start — same for the sprint planning day warning
  *  - /test daily|planning|review — previews a meeting reminder (deleted after a few minutes)
- *  - artifact commands — see {@link ArtifactDialogs}; work only in the target chat
+ *  - artifact commands — see {@link ArtifactDialogs}; work in the work chat and test chats
+ *    (each chat has its own data)
+ *  - /test_cleanup — test chats only: deletes artifact data created in the chat
  */
 public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatApi {
 
@@ -70,6 +73,7 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
     private final Scheduler scheduler;
     private final AppConfig config;
     private final SprintSchedule sprints;
+    private final AccessControl access;
     private final ArtifactDialogs artifacts;
 
     public ReminderBot(TelegramClient client, Scheduler scheduler, AppConfig config, SprintSchedule sprints,
@@ -78,23 +82,42 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
         this.scheduler = scheduler;
         this.config = config;
         this.sprints = sprints;
+        this.access = new AccessControl(client, config.accessRules());
         this.artifacts = new ArtifactDialogs(this, artifactRepository,
                 new EpicMatcher(config.epicKeyPrefixes()), config.artifactTypes(),
-                config.artifactResultTtl(), config.artifactDialogTimeout());
+                config.artifactResultTtl(), config.artifactDialogTimeout(), access, config.testChatIds());
     }
 
-    /** Shows bot commands in the "/" menu of the target chat. */
+    private boolean isTestChat(long chatId) {
+        return config.testChatIds().contains(chatId);
+    }
+
+    /** Startup checks of the work chat settings (logged as warnings). */
+    public void checkChatSettings() {
+        access.checkChatSettings(config.chatId());
+    }
+
+    /** Shows bot commands in the "/" menu of the work chat and test chats (test chats also get test commands). */
     public void registerCommands() {
-        List<BotCommand> commands = new ArrayList<>();
-        commands.add(new BotCommand("sprint", "Даты спринта, напоминания и встречи"));
-        ArtifactDialogs.COMMANDS.forEach((cmd, description) -> commands.add(new BotCommand(cmd.substring(1), description)));
+        List<BotCommand> work = new ArrayList<>();
+        work.add(new BotCommand("sprint", "Даты спринта, напоминания и встречи"));
+        ArtifactDialogs.COMMANDS.forEach((cmd, description) -> work.add(new BotCommand(cmd.substring(1), description)));
+        registerCommands(config.chatId(), work);
+
+        List<BotCommand> test = new ArrayList<>(work);
+        test.add(new BotCommand("test", "Тест: напоминание (start | daily | planning | review)"));
+        test.add(new BotCommand(ArtifactDialogs.CLEANUP_COMMAND.substring(1), "Удалить данные, созданные в этом чате"));
+        config.testChatIds().forEach(chatId -> registerCommands(chatId, test));
+    }
+
+    private void registerCommands(long chatId, List<BotCommand> commands) {
         try {
             client.execute(SetMyCommands.builder()
                     .commands(commands)
-                    .scope(new BotCommandScopeChat(String.valueOf(config.chatId())))
+                    .scope(new BotCommandScopeChat(String.valueOf(chatId)))
                     .build());
         } catch (TelegramApiException e) {
-            log.warn("Failed to register bot commands: {}", e.getMessage());
+            log.warn("Failed to register bot commands in chat {}: {}", chatId, e.getMessage());
         }
     }
 
@@ -121,10 +144,16 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
         String arg = parts.length > 1 ? parts[1].trim() : "";
         String command = parseCommand(parts[0]);
 
-        if (ArtifactDialogs.COMMANDS.containsKey(command)) {
-            if (chatId == config.chatId() && message.getFrom() != null) {
+        boolean artifactCommand = ArtifactDialogs.COMMANDS.containsKey(command)
+                && (chatId == config.chatId() || isTestChat(chatId));
+        boolean cleanupCommand = ArtifactDialogs.CLEANUP_COMMAND.equals(command) && isTestChat(chatId);
+        if (artifactCommand || cleanupCommand) {
+            if (message.getFrom() != null) {
                 artifacts.onCommand(command, chatId, message.getFrom(), message.getMessageId());
             }
+            return;
+        }
+        if (ArtifactDialogs.COMMANDS.containsKey(command) || ArtifactDialogs.CLEANUP_COMMAND.equals(command)) {
             return;
         }
         if (!command.startsWith("/") && message.getFrom() != null) {
@@ -139,8 +168,8 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
                 case "/sprint" -> send(chatId, sprintInfo());
 
                 case "/test" -> {
-                    if (chatId != config.chatId()) {
-                        log.info("Ignored /test from chat {} (target chat is {})", chatId, config.chatId());
+                    if (!isTestChat(chatId)) {
+                        log.info("Ignored /test from chat {} (test chats: {})", chatId, config.testChatIds());
                         return;
                     }
                     if (!arg.isEmpty() && !arg.equalsIgnoreCase("start")) {

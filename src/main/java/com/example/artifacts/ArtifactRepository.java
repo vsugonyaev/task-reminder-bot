@@ -18,8 +18,9 @@ import java.util.Optional;
 /**
  * SQLite storage for epics and artifacts.
  *
- * Nothing is ever deleted: epics are archived, artifacts are soft-deleted,
- * and every change of an artifact is written to artifact_history.
+ * Epics belong to the chat they were created in. Work data is never deleted: epics are archived,
+ * artifacts are soft-deleted, and every change of an artifact is written to artifact_history.
+ * The only hard delete is {@link #deleteChatData} for test chats.
  */
 public class ArtifactRepository implements AutoCloseable {
 
@@ -27,21 +28,33 @@ public class ArtifactRepository implements AutoCloseable {
 
     private final Connection connection;
 
-    public ArtifactRepository(Path dbPath) {
+    private static final String EPICS_DDL = """
+            CREATE TABLE %s (
+                id          INTEGER PRIMARY KEY,
+                chat_id     INTEGER NOT NULL,
+                key         TEXT NOT NULL,
+                name        TEXT NOT NULL,
+                created_by  TEXT,
+                created_at  TEXT NOT NULL,
+                archived_by TEXT,
+                archived_at TEXT,
+                UNIQUE (chat_id, key)
+            )""";
+
+    /**
+     * @param legacyChatId chat that owns epics created before epics were bound to chats
+     */
+    public ArtifactRepository(Path dbPath, long legacyChatId) {
         try {
             connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath.toAbsolutePath());
             try (Statement st = connection.createStatement()) {
+                if (tableExists("epics") && !columnExists("epics", "chat_id")) {
+                    migrateEpicsToChats(legacyChatId);
+                }
                 st.execute("PRAGMA foreign_keys = ON");
-                st.execute("""
-                        CREATE TABLE IF NOT EXISTS epics (
-                            id          INTEGER PRIMARY KEY,
-                            key         TEXT NOT NULL UNIQUE,
-                            name        TEXT NOT NULL,
-                            created_by  TEXT,
-                            created_at  TEXT NOT NULL,
-                            archived_by TEXT,
-                            archived_at TEXT
-                        )""");
+                if (!tableExists("epics")) {
+                    st.execute(EPICS_DDL.formatted("epics"));
+                }
                 st.execute("""
                         CREATE TABLE IF NOT EXISTS artifacts (
                             id         INTEGER PRIMARY KEY,
@@ -72,15 +85,45 @@ public class ArtifactRepository implements AutoCloseable {
         }
     }
 
-    // --- Epics ---
+    /** Rebuilds epics with chat_id and UNIQUE(chat_id, key); existing epics go to legacyChatId. */
+    private void migrateEpicsToChats(long legacyChatId) throws SQLException {
+        try (Statement st = connection.createStatement()) {
+            st.execute("PRAGMA foreign_keys = OFF");
+            connection.setAutoCommit(false);
+            try {
+                st.execute(EPICS_DDL.formatted("epics_new"));
+                try (PreparedStatement ps = connection.prepareStatement("""
+                        INSERT INTO epics_new (id, chat_id, key, name, created_by, created_at, archived_by, archived_at)
+                        SELECT id, ?, key, name, created_by, created_at, archived_by, archived_at FROM epics""")) {
+                    ps.setLong(1, legacyChatId);
+                    ps.executeUpdate();
+                }
+                st.execute("DROP TABLE epics");
+                st.execute("ALTER TABLE epics_new RENAME TO epics");
+                connection.commit();
+                log.info("Migrated epics: bound existing epics to chat {}", legacyChatId);
+            } catch (SQLException e) {
+                connection.rollback();
+                throw e;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        }
+    }
 
-    public synchronized List<Epic> epics(boolean archived) {
-        String sql = "SELECT id, key, name, archived_at FROM epics WHERE archived_at IS "
-                + (archived ? "NOT NULL" : "NULL");
+    // --- Epics (each chat has its own) ---
+
+    private static final String EPIC_COLUMNS = "SELECT id, chat_id, key, name, archived_at FROM epics ";
+
+    public synchronized List<Epic> epics(long chatId, boolean archived) {
+        String sql = EPIC_COLUMNS + "WHERE chat_id = ? AND archived_at IS " + (archived ? "NOT NULL" : "NULL");
         List<Epic> result = new ArrayList<>();
-        try (PreparedStatement ps = connection.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                result.add(epic(rs));
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, chatId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    result.add(epic(rs));
+                }
             }
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to load epics", e);
@@ -89,28 +132,74 @@ public class ArtifactRepository implements AutoCloseable {
         return result;
     }
 
-    public synchronized Optional<Epic> epic(long id) {
-        return queryEpic("SELECT id, key, name, archived_at FROM epics WHERE id = ?", ps -> ps.setLong(1, id));
+    public synchronized Optional<Epic> epic(long chatId, long id) {
+        return queryEpic(EPIC_COLUMNS + "WHERE chat_id = ? AND id = ?", ps -> {
+            ps.setLong(1, chatId);
+            ps.setLong(2, id);
+        });
     }
 
-    public synchronized Optional<Epic> epicByKey(String key) {
-        return queryEpic("SELECT id, key, name, archived_at FROM epics WHERE key = ?", ps -> ps.setString(1, key));
+    public synchronized Optional<Epic> epicByKey(long chatId, String key) {
+        return queryEpic(EPIC_COLUMNS + "WHERE chat_id = ? AND key = ?", ps -> {
+            ps.setLong(1, chatId);
+            ps.setString(2, key);
+        });
     }
 
-    public synchronized Epic createEpic(String key, String name, String user) {
+    public synchronized Epic createEpic(long chatId, String key, String name, String user) {
         try (PreparedStatement ps = connection.prepareStatement(
-                "INSERT INTO epics (key, name, created_by, created_at) VALUES (?, ?, ?, ?)",
+                "INSERT INTO epics (chat_id, key, name, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
                 Statement.RETURN_GENERATED_KEYS)) {
-            ps.setString(1, key);
-            ps.setString(2, name);
-            ps.setString(3, user);
-            ps.setString(4, Instant.now().toString());
+            ps.setLong(1, chatId);
+            ps.setString(2, key);
+            ps.setString(3, name);
+            ps.setString(4, user);
+            ps.setString(5, Instant.now().toString());
             ps.executeUpdate();
-            log.info("Epic created: {} {} by {}", key, name, user);
-            return new Epic(generatedId(ps), key, name, null);
+            log.info("Epic created in chat {}: {} {} by {}", chatId, key, name, user);
+            return new Epic(generatedId(ps), chatId, key, name, null);
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to create epic " + key, e);
         }
+    }
+
+    public record ChatDataStats(int epics, int artifacts) {}
+
+    public synchronized ChatDataStats chatDataStats(long chatId) {
+        return new ChatDataStats(
+                count("SELECT COUNT(*) FROM epics WHERE chat_id = ?", chatId),
+                count("SELECT COUNT(*) FROM artifacts WHERE epic_id IN (SELECT id FROM epics WHERE chat_id = ?)", chatId));
+    }
+
+    /**
+     * Permanently deletes all epics, artifacts and history of the chat. Only for test chats —
+     * work data is never deleted.
+     */
+    public synchronized ChatDataStats deleteChatData(long chatId) {
+        ChatDataStats stats = chatDataStats(chatId);
+        try {
+            connection.setAutoCommit(false);
+            update("DELETE FROM artifact_history WHERE artifact_id IN (SELECT a.id FROM artifacts a "
+                    + "JOIN epics e ON e.id = a.epic_id WHERE e.chat_id = ?)", chatId);
+            update("DELETE FROM artifacts WHERE epic_id IN (SELECT id FROM epics WHERE chat_id = ?)", chatId);
+            update("DELETE FROM epics WHERE chat_id = ?", chatId);
+            connection.commit();
+        } catch (SQLException | RuntimeException e) {
+            try {
+                connection.rollback();
+            } catch (SQLException ignored) {
+                // original error is more important
+            }
+            throw new IllegalStateException("Failed to delete data of chat " + chatId, e);
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException e) {
+                log.error("Failed to restore auto-commit", e);
+            }
+        }
+        log.info("Deleted data of chat {}: {}", chatId, stats);
+        return stats;
     }
 
     public synchronized void archiveEpic(long id, String user) {
@@ -222,6 +311,39 @@ public class ArtifactRepository implements AutoCloseable {
         }
     }
 
+    private boolean tableExists(String table) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")) {
+            ps.setString(1, table);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private boolean columnExists(String table, String column) throws SQLException {
+        try (Statement st = connection.createStatement();
+             ResultSet rs = st.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (rs.next()) {
+                if (column.equals(rs.getString("name"))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private int count(String sql, long param) {
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, param);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Query failed: " + sql, e);
+        }
+    }
+
     private static long generatedId(PreparedStatement ps) throws SQLException {
         try (ResultSet keys = ps.getGeneratedKeys()) {
             keys.next();
@@ -231,7 +353,7 @@ public class ArtifactRepository implements AutoCloseable {
 
     private static Epic epic(ResultSet rs) throws SQLException {
         String archivedAt = rs.getString("archived_at");
-        return new Epic(rs.getLong("id"), rs.getString("key"), rs.getString("name"),
+        return new Epic(rs.getLong("id"), rs.getLong("chat_id"), rs.getString("key"), rs.getString("name"),
                 archivedAt != null ? Instant.parse(archivedAt) : null);
     }
 
