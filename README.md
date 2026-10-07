@@ -84,6 +84,9 @@
    - Working directory: папка проекта (там лежит `config.properties`)
 4. Run
 
+## Круглосуточная работа на Windows
+Установка как фоновой задачи с автозапуском и автоперезапуском — см. [deploy/windows/README.md](deploy/windows/README.md).
+
 ## Сборка fat-jar
 ```bash
 mvn -DskipTests package

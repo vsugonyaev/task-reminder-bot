@@ -35,7 +35,18 @@ public class Main {
 
     private static final Logger log = LoggerFactory.getLogger(Main.class);
 
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) {
+        try {
+            start();
+        } catch (Exception e) {
+            // Without an explicit exit the JVM keeps running on Quartz threads and the bot hangs half-started;
+            // exiting lets the supervisor (run.cmd / systemd) restart it, e.g. once the network is up
+            log.error("Startup failed, exiting", e);
+            System.exit(1);
+        }
+    }
+
+    private static void start() throws Exception {
         AppConfig config = AppConfig.load();
         log.info("Loaded {}", config);
 
