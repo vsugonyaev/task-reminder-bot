@@ -16,12 +16,14 @@ import org.telegram.telegrambots.meta.api.methods.pinnedmessages.UnpinChatMessag
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.commands.SetMyCommands;
+import org.telegram.telegrambots.meta.api.methods.groupadministration.GetChatAdministrators;
 import org.telegram.telegrambots.meta.api.methods.updatingmessages.DeleteMessage;
 import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText;
 import org.telegram.telegrambots.meta.api.objects.commands.BotCommand;
 import org.telegram.telegrambots.meta.api.objects.commands.scope.BotCommandScopeChat;
 import org.telegram.telegrambots.meta.api.objects.LinkPreviewOptions;
 import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.chatmember.ChatMember;
 import org.telegram.telegrambots.meta.api.objects.message.Message;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
@@ -36,6 +38,7 @@ import com.example.artifacts.ArtifactDialogs;
 import com.example.artifacts.ArtifactRepository;
 import com.example.artifacts.ChatApi;
 import com.example.artifacts.EpicMatcher;
+import com.example.artifacts.Person;
 import com.example.config.AppConfig;
 import com.example.meeting.Meeting;
 import com.example.sprint.SprintSchedule;
@@ -93,7 +96,7 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
         this.sprints = sprints;
         this.access = new AccessControl(client, config.accessRules());
         this.artifacts = artifactRepository == null ? null : new ArtifactDialogs(this, artifactRepository,
-                new EpicMatcher(config.epicKeyPrefixes()), config.artifactTypes(),
+                new EpicMatcher(config.epicKeyPrefixes()), config.artifactTypes(), config.artifactRoles(),
                 config.artifactResultTtl(), config.artifactDialogTimeout(), access, config.testChatIds());
     }
 
@@ -161,6 +164,10 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
 
     private void onMessage(Message message) {
         long chatId = message.getChatId();
+        // Telegram gives bots no member list: remember everyone who writes, to offer them as epic assignees
+        if (artifacts != null && message.getFrom() != null && (chatId == config.chatId() || isTestChat(chatId))) {
+            artifacts.rememberMember(chatId, message.getFrom());
+        }
         String[] parts = message.getText().trim().split("\\s+", 2);
         String arg = parts.length > 1 ? parts[1].trim() : "";
         String command = parseCommand(parts[0]);
@@ -522,6 +529,22 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
                     .build());
         } catch (TelegramApiException e) {
             log.warn("Failed to answer callback: {}", e.getMessage());
+        }
+    }
+
+    @Override
+    public List<Person> administrators(long chatId) {
+        try {
+            return client.execute(GetChatAdministrators.builder().chatId(String.valueOf(chatId)).build()).stream()
+                    .map(ChatMember::getUser)
+                    .filter(u -> !Boolean.TRUE.equals(u.getIsBot()))
+                    .map(u -> new Person(u.getId(),
+                            (u.getFirstName() + (u.getLastName() != null ? " " + u.getLastName() : "")).trim(),
+                            u.getUserName()))
+                    .toList();
+        } catch (TelegramApiException e) {
+            log.warn("Failed to get administrators of chat {}: {}", chatId, e.getMessage());
+            return List.of();
         }
     }
 

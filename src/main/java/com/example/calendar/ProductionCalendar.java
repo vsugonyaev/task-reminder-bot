@@ -31,6 +31,11 @@ public class ProductionCalendar {
 
     private static final String API_URL = "https://isdayoff.ru/api/getdata?cc=ru&year=";
     private static final Duration CACHE_TTL = Duration.ofDays(7);
+    /**
+     * After a failed load don't ask again for a while: the calendar is consulted day by day, and waiting for
+     * an unreachable site on every call delayed startup by minutes and would delay reminders the same way.
+     */
+    private static final Duration RETRY_AFTER_FAILURE = Duration.ofMinutes(30);
     /** A real year has at least 104 weekend days; anything less means the year is not published. */
     private static final int MIN_DAYS_OFF = 104;
 
@@ -43,10 +48,19 @@ public class ProductionCalendar {
 
     private record YearData(String days, Instant loadedAt) {}
 
-    private final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
-            .build();
+    private final String apiUrl;
+    private final HttpClient http;
     private final Map<Integer, YearData> cache = new ConcurrentHashMap<>();
+    private final Map<Integer, Instant> failedAt = new ConcurrentHashMap<>();
+
+    public ProductionCalendar() {
+        this(API_URL, Duration.ofSeconds(10));
+    }
+
+    ProductionCalendar(String apiUrl, Duration connectTimeout) {
+        this.apiUrl = apiUrl;
+        this.http = HttpClient.newBuilder().connectTimeout(connectTimeout).build();
+    }
 
     public boolean isWorkingDay(LocalDate date) {
         String days = yearData(date.getYear());
@@ -61,18 +75,24 @@ public class ProductionCalendar {
         if (cached != null && cached.loadedAt().plus(CACHE_TTL).isAfter(Instant.now())) {
             return cached.days();
         }
+        Instant failed = failedAt.get(year);
+        if (failed != null && failed.plus(RETRY_AFTER_FAILURE).isAfter(Instant.now())) {
+            return cached != null ? cached.days() : null;
+        }
         String fresh = fetch(year);
         if (fresh != null) {
             cache.put(year, new YearData(fresh, Instant.now()));
+            failedAt.remove(year);
             return fresh;
         }
+        failedAt.put(year, Instant.now());
         // Keep using stale data rather than the rough fallback
         return cached != null ? cached.days() : null;
     }
 
     private String fetch(int year) {
         try {
-            HttpRequest request = HttpRequest.newBuilder(URI.create(API_URL + year))
+            HttpRequest request = HttpRequest.newBuilder(URI.create(apiUrl + year))
                     .timeout(Duration.ofSeconds(15))
                     .GET()
                     .build();

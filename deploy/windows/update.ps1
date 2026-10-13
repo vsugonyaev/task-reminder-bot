@@ -43,7 +43,7 @@ Copy-Item (Join-Path $PSScriptRoot 'run.cmd') (Join-Path $InstallDir 'run.cmd') 
 
 $startedAt = Get-Date
 Start-ScheduledTask -TaskName $TaskName
-Write-Host 'Перезапускаю и жду старта бота (до 90 сек)...'
+Write-Host 'Перезапускаю и жду старта бота (до 3 мин)...'
 if (Wait-BotStarted $InstallDir $startedAt) {
     Write-Host 'Бот обновлён и запущен.' -ForegroundColor Green
 } else {

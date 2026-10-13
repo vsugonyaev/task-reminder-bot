@@ -13,6 +13,7 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -27,6 +28,8 @@ public class ArtifactRepository implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(ArtifactRepository.class);
 
     private final Connection connection;
+
+    private static final Map<String, String> LEGACY_TYPES = Map.of("SA", "СТ", "BA", "БТ");
 
     private static final String EPICS_DDL = """
             CREATE TABLE %s (
@@ -77,6 +80,35 @@ public class ArtifactRepository implements AutoCloseable {
                             new_url     TEXT,
                             changed_by  TEXT,
                             changed_at  TEXT NOT NULL
+                        )""");
+                // Link title shown in lists ("СТ ВТБО", "Макеты ИБ Figma"); null — the type is shown
+                addColumnIfMissing("artifacts", "title", "TEXT");
+                addColumnIfMissing("artifact_history", "old_title", "TEXT");
+                addColumnIfMissing("artifact_history", "new_title", "TEXT");
+                // SA/BA became roles of people; their documents are СТ/БТ
+                LEGACY_TYPES.forEach((from, to) -> update("UPDATE artifacts SET type = ? WHERE type = ?", to, from));
+                // People assigned to an epic by role (БА, СА, Дизайн); user_id is null for names typed by hand
+                st.execute("""
+                        CREATE TABLE IF NOT EXISTS epic_members (
+                            id         INTEGER PRIMARY KEY,
+                            epic_id    INTEGER NOT NULL REFERENCES epics(id),
+                            role       TEXT NOT NULL,
+                            user_id    INTEGER,
+                            name       TEXT NOT NULL,
+                            added_by   TEXT,
+                            added_at   TEXT NOT NULL,
+                            removed_by TEXT,
+                            removed_at TEXT
+                        )""");
+                // Members the bot has seen in a chat: Telegram gives bots no full member list
+                st.execute("""
+                        CREATE TABLE IF NOT EXISTS chat_members (
+                            chat_id   INTEGER NOT NULL,
+                            user_id   INTEGER NOT NULL,
+                            name      TEXT NOT NULL,
+                            username  TEXT,
+                            last_seen TEXT NOT NULL,
+                            PRIMARY KEY (chat_id, user_id)
                         )""");
             }
             log.info("Artifacts database: {}", dbPath.toAbsolutePath());
@@ -182,7 +214,9 @@ public class ArtifactRepository implements AutoCloseable {
             update("DELETE FROM artifact_history WHERE artifact_id IN (SELECT a.id FROM artifacts a "
                     + "JOIN epics e ON e.id = a.epic_id WHERE e.chat_id = ?)", chatId);
             update("DELETE FROM artifacts WHERE epic_id IN (SELECT id FROM epics WHERE chat_id = ?)", chatId);
+            update("DELETE FROM epic_members WHERE epic_id IN (SELECT id FROM epics WHERE chat_id = ?)", chatId);
             update("DELETE FROM epics WHERE chat_id = ?", chatId);
+            update("DELETE FROM chat_members WHERE chat_id = ?", chatId);
             connection.commit();
         } catch (SQLException | RuntimeException e) {
             try {
@@ -213,7 +247,7 @@ public class ArtifactRepository implements AutoCloseable {
     public synchronized List<Artifact> artifacts(long epicId) {
         List<Artifact> result = new ArrayList<>();
         try (PreparedStatement ps = connection.prepareStatement(
-                "SELECT id, epic_id, type, url FROM artifacts WHERE epic_id = ? AND deleted_at IS NULL ORDER BY id")) {
+                "SELECT id, epic_id, type, title, url FROM artifacts WHERE epic_id = ? AND deleted_at IS NULL ORDER BY id")) {
             ps.setLong(1, epicId);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
@@ -228,7 +262,7 @@ public class ArtifactRepository implements AutoCloseable {
 
     public synchronized Optional<Artifact> artifact(long id) {
         try (PreparedStatement ps = connection.prepareStatement(
-                "SELECT id, epic_id, type, url FROM artifacts WHERE id = ? AND deleted_at IS NULL")) {
+                "SELECT id, epic_id, type, title, url FROM artifacts WHERE id = ? AND deleted_at IS NULL")) {
             ps.setLong(1, id);
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? Optional.of(artifact(rs)) : Optional.empty();
@@ -238,22 +272,32 @@ public class ArtifactRepository implements AutoCloseable {
         }
     }
 
-    public synchronized void addArtifact(long epicId, String type, String url, String user) {
+    public synchronized void addArtifact(long epicId, String type, String title, String url, String user) {
         String now = Instant.now().toString();
         try (PreparedStatement ps = connection.prepareStatement(
-                "INSERT INTO artifacts (epic_id, type, url, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO artifacts (epic_id, type, title, url, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 Statement.RETURN_GENERATED_KEYS)) {
             ps.setLong(1, epicId);
             ps.setString(2, type);
-            ps.setString(3, url);
-            ps.setString(4, user);
-            ps.setString(5, now);
+            ps.setString(3, title);
+            ps.setString(4, url);
+            ps.setString(5, user);
+            ps.setString(6, now);
             ps.executeUpdate();
-            history(generatedId(ps), "ADD", null, url, user, now);
-            log.info("Artifact added: epic={}, type={} by {}", epicId, type, user);
+            history(generatedId(ps), "ADD", null, url, null, title, user, now);
+            log.info("Artifact added: epic={}, type={}, title={} by {}", epicId, type, title, user);
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to add artifact", e);
         }
+    }
+
+    public synchronized void renameArtifact(long artifactId, String newTitle, String user) {
+        Artifact old = artifact(artifactId).orElseThrow();
+        String now = Instant.now().toString();
+        update("UPDATE artifacts SET title = ?, updated_by = ?, updated_at = ? WHERE id = ?",
+                newTitle, user, now, artifactId);
+        history(artifactId, "RENAME", null, null, old.title(), newTitle, user, now);
+        log.info("Artifact {} renamed by {}", artifactId, user);
     }
 
     public synchronized void replaceUrl(long artifactId, String newUrl, String user) {
@@ -261,7 +305,7 @@ public class ArtifactRepository implements AutoCloseable {
         String now = Instant.now().toString();
         update("UPDATE artifacts SET url = ?, updated_by = ?, updated_at = ? WHERE id = ?",
                 newUrl, user, now, artifactId);
-        history(artifactId, "REPLACE", old.url(), newUrl, user, now);
+        history(artifactId, "REPLACE", old.url(), newUrl, null, null, user, now);
         log.info("Artifact {} url replaced by {}", artifactId, user);
     }
 
@@ -269,8 +313,74 @@ public class ArtifactRepository implements AutoCloseable {
         Artifact old = artifact(artifactId).orElseThrow();
         String now = Instant.now().toString();
         update("UPDATE artifacts SET deleted_by = ?, deleted_at = ? WHERE id = ?", user, now, artifactId);
-        history(artifactId, "DELETE", old.url(), null, user, now);
+        history(artifactId, "DELETE", old.url(), null, old.title(), null, user, now);
         log.info("Artifact {} deleted by {}", artifactId, user);
+    }
+
+    // --- Epic members (assignees by role) ---
+
+    public synchronized List<Assignee> assignees(long epicId) {
+        List<Assignee> result = new ArrayList<>();
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT id, epic_id, role, user_id, name FROM epic_members "
+                        + "WHERE epic_id = ? AND removed_at IS NULL ORDER BY id")) {
+            ps.setLong(1, epicId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    long id = rs.getLong("user_id");
+                    Long userId = rs.wasNull() ? null : id; // wasNull() refers to the last read column
+                    result.add(new Assignee(rs.getLong("id"), rs.getLong("epic_id"), rs.getString("role"),
+                            userId, rs.getString("name")));
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to load members of epic " + epicId, e);
+        }
+        return result;
+    }
+
+    /** Adds a person to a role; a no-op if they are already there (same user id, or same typed name). */
+    public synchronized void addAssignee(long epicId, String role, Long userId, String name, String user) {
+        boolean exists = assignees(epicId).stream()
+                .filter(a -> a.role().equals(role))
+                .anyMatch(a -> userId != null ? userId.equals(a.userId()) : a.userId() == null && a.name().equalsIgnoreCase(name));
+        if (exists) {
+            return;
+        }
+        update("INSERT INTO epic_members (epic_id, role, user_id, name, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)",
+                epicId, role, userId, name, user, Instant.now().toString());
+        log.info("Epic {}: {} added to {} by {}", epicId, name, role, user);
+    }
+
+    public synchronized void removeAssignee(long assigneeId, String user) {
+        update("UPDATE epic_members SET removed_by = ?, removed_at = ? WHERE id = ? AND removed_at IS NULL",
+                user, Instant.now().toString(), assigneeId);
+        log.info("Epic member {} removed by {}", assigneeId, user);
+    }
+
+    // --- Chat members seen by the bot ---
+
+    public synchronized void rememberMember(long chatId, long userId, String name, String username) {
+        update("INSERT INTO chat_members (chat_id, user_id, name, username, last_seen) VALUES (?, ?, ?, ?, ?) "
+                        + "ON CONFLICT (chat_id, user_id) DO UPDATE SET name = excluded.name, "
+                        + "username = excluded.username, last_seen = excluded.last_seen",
+                chatId, userId, name, username, Instant.now().toString());
+    }
+
+    public synchronized List<Person> chatMembers(long chatId) {
+        List<Person> result = new ArrayList<>();
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT user_id, name, username FROM chat_members WHERE chat_id = ? ORDER BY name COLLATE NOCASE")) {
+            ps.setLong(1, chatId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    result.add(new Person(rs.getLong("user_id"), rs.getString("name"), rs.getString("username")));
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to load members of chat " + chatId, e);
+        }
+        return result;
     }
 
     @Override
@@ -295,9 +405,10 @@ public class ArtifactRepository implements AutoCloseable {
         }
     }
 
-    private void history(long artifactId, String action, String oldUrl, String newUrl, String user, String at) {
-        update("INSERT INTO artifact_history (artifact_id, action, old_url, new_url, changed_by, changed_at) "
-                + "VALUES (?, ?, ?, ?, ?, ?)", artifactId, action, oldUrl, newUrl, user, at);
+    private void history(long artifactId, String action, String oldUrl, String newUrl,
+                         String oldTitle, String newTitle, String user, String at) {
+        update("INSERT INTO artifact_history (artifact_id, action, old_url, new_url, old_title, new_title, changed_by, changed_at) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", artifactId, action, oldUrl, newUrl, oldTitle, newTitle, user, at);
     }
 
     private void update(String sql, Object... params) {
@@ -308,6 +419,15 @@ public class ArtifactRepository implements AutoCloseable {
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new IllegalStateException("Database update failed: " + sql, e);
+        }
+    }
+
+    private void addColumnIfMissing(String table, String column, String type) throws SQLException {
+        if (!columnExists(table, column)) {
+            try (Statement st = connection.createStatement()) {
+                st.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + type);
+            }
+            log.info("Migrated: added {}.{}", table, column);
         }
     }
 
@@ -358,6 +478,7 @@ public class ArtifactRepository implements AutoCloseable {
     }
 
     private static Artifact artifact(ResultSet rs) throws SQLException {
-        return new Artifact(rs.getLong("id"), rs.getLong("epic_id"), rs.getString("type"), rs.getString("url"));
+        return new Artifact(rs.getLong("id"), rs.getLong("epic_id"), rs.getString("type"), rs.getString("title"),
+                rs.getString("url"));
     }
 }

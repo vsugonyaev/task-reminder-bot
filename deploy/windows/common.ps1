@@ -88,7 +88,7 @@ function Show-LogTail([string]$installDir, [int]$lines = 25) {
 }
 
 # Ждёт в логе "Bot started" (успех) или падение main (ошибка запуска)
-function Wait-BotStarted([string]$installDir, [datetime]$since, [int]$timeoutSec = 90) {
+function Wait-BotStarted([string]$installDir, [datetime]$since, [int]$timeoutSec = 180) {
     $log = Join-Path $installDir 'logs\bot.log'
     $deadline = (Get-Date).AddSeconds($timeoutSec)
     while ((Get-Date) -lt $deadline) {

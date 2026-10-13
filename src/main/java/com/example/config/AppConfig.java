@@ -54,6 +54,7 @@ public record AppConfig(
         boolean artifactsEnabled,
         Path artifactsDbPath,
         List<String> artifactTypes,
+        List<String> artifactRoles,
         List<String> epicKeyPrefixes,
         Duration artifactResultTtl,
         Duration artifactDialogTimeout,
@@ -86,7 +87,8 @@ public record AppConfig(
             Map.entry("commands.delete-after-minutes", "5"),
             Map.entry("artifacts.enabled", "false"),
             Map.entry("artifacts.db-path", "artifacts.db"),
-            Map.entry("artifacts.types", "SA, BA, Макеты, ТПиС, ПТР, ПМИ, ПСИ, ТКР, ТИС, АР, АИС, Тест-план к4"),
+            Map.entry("artifacts.types", "БТ, СТ, Макеты, ТПиС, ПТР, ПМИ, ПСИ, ТКР, ТИС, АР, АИС, Тест-план к4"),
+            Map.entry("artifacts.roles", "БА, СА, Дизайн"),
             Map.entry("artifacts.epic-key-prefixes", "STRLPL, STRLPDML"),
             Map.entry("artifacts.result-delete-minutes", "5"),
             Map.entry("artifacts.dialog-timeout-minutes", "10"),
@@ -144,6 +146,7 @@ public record AppConfig(
                 required(props, "artifacts.enabled", AppConfig::bool),
                 required(props, "artifacts.db-path", Path::of),
                 required(props, "artifacts.types", AppConfig::list),
+                required(props, "artifacts.roles", AppConfig::list),
                 required(props, "artifacts.epic-key-prefixes", AppConfig::list),
                 required(props, "artifacts.result-delete-minutes", v -> Duration.ofMinutes(positiveInt(v))),
                 required(props, "artifacts.dialog-timeout-minutes", v -> Duration.ofMinutes(positiveInt(v))),
@@ -272,7 +275,7 @@ public record AppConfig(
                 + ", meetingTeam=" + meetingTeam + ", meetingRemindBefore=" + meetingRemindBefore
                 + ", meetingDeleteAfter=" + meetingDeleteAfter + ", meetings=" + meetings.values()
                 + ", commandsDeleteAfter=" + commandsDeleteAfter + ", artifactsEnabled=" + artifactsEnabled
-                + ", artifactsDbPath=" + artifactsDbPath + ", artifactTypes=" + artifactTypes
+                + ", artifactsDbPath=" + artifactsDbPath + ", artifactTypes=" + artifactTypes + ", artifactRoles=" + artifactRoles
                 + ", epicKeyPrefixes=" + epicKeyPrefixes + ", artifactResultTtl=" + artifactResultTtl
                 + ", artifactDialogTimeout=" + artifactDialogTimeout
                 + ", testChatIds=" + testChatIds + ", accessRules=" + accessRules + "]";

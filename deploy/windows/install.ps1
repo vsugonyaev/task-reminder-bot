@@ -73,7 +73,7 @@ Write-Host "  задача планировщика '$TaskName' зарегист
 # 6. Запуск и проверка
 $startedAt = Get-Date
 Start-ScheduledTask -TaskName $TaskName
-Write-Host 'Запускаю и жду старта бота (до 90 сек)...'
+Write-Host 'Запускаю и жду старта бота (до 3 мин)...'
 if (Wait-BotStarted $InstallDir $startedAt) {
     Write-Host 'Бот запущен.' -ForegroundColor Green
 } else {
