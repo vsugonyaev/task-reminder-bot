@@ -96,7 +96,7 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
         this.sprints = sprints;
         this.access = new AccessControl(client, config.accessRules());
         this.artifacts = artifactRepository == null ? null : new ArtifactDialogs(this, artifactRepository,
-                new EpicMatcher(config.epicKeyPrefixes()), config.artifactTypes(), config.artifactRoles(),
+                new EpicMatcher(config.epicKeyPrefixes()), config.artifactTypes(), config.artifactRoles(), config.artifactRoleTags(),
                 config.artifactResultTtl(), config.artifactDialogTimeout(), access, config.testChatIds());
     }
 
@@ -547,6 +547,11 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
             log.warn("Failed to get administrators of chat {}: {}", chatId, e.getMessage());
             return List.of();
         }
+    }
+
+    @Override
+    public String memberTag(long chatId, long userId) {
+        return access.tag(chatId, userId);
     }
 
     @Override

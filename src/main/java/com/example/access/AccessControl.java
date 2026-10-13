@@ -60,6 +60,12 @@ public class AccessControl implements PermissionChecker {
         return ok;
     }
 
+    /** Member tag in the chat (custom title for administrators); null if none or unknown. Cached. */
+    public String tag(long chatId, long userId) {
+        Member member = member(chatId, userId);
+        return member != null && member.tag() != null && !member.tag().isBlank() ? member.tag().trim() : null;
+    }
+
     /** Warns if regular members may change their own tag — then anyone could grant themselves access. */
     public void checkChatSettings(long chatId) {
         try {

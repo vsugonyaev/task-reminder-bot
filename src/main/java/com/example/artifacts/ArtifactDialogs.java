@@ -108,6 +108,11 @@ public class ArtifactDialogs implements AutoCloseable {
         String role;
         int peoplePage;
         List<Person> admins;
+        /** Member tags looked up in this dialog (userId -> tag, "" for none). */
+        final Map<Long, String> tags = new HashMap<>();
+
+        /** The author just wrote a message: the next render re-posts the panel below it. */
+        boolean repost;
 
         Session(Kind kind, long chatId, User from) {
             this.kind = kind;
@@ -124,6 +129,7 @@ public class ArtifactDialogs implements AutoCloseable {
     private final EpicMatcher matcher;
     private final List<String> types;
     private final List<String> roles;
+    private final Map<String, String> roleTags;
     private final Duration resultTtl;
     private final Duration timeout;
     private final Map<String, Session> sessions = new HashMap<>();
@@ -133,9 +139,12 @@ public class ArtifactDialogs implements AutoCloseable {
         return t;
     });
 
+    /**
+     * @param roleTags role -> member tag whose owners are offered first as assignees (БА -> BA)
+     */
     public ArtifactDialogs(ChatApi chat, ArtifactRepository repo, EpicMatcher matcher, List<String> types,
-                           List<String> roles, Duration resultTtl, Duration timeout, PermissionChecker access,
-                           Set<Long> testChatIds) {
+                           List<String> roles, Map<String, String> roleTags, Duration resultTtl, Duration timeout,
+                           PermissionChecker access, Set<Long> testChatIds) {
         this.chat = chat;
         this.testChatIds = Set.copyOf(testChatIds);
         this.access = access;
@@ -143,6 +152,7 @@ public class ArtifactDialogs implements AutoCloseable {
         this.matcher = matcher;
         this.types = List.copyOf(types);
         this.roles = List.copyOf(roles);
+        this.roleTags = Map.copyOf(roleTags);
         this.resultTtl = resultTtl;
         this.timeout = timeout;
         sweeper.scheduleWithFixedDelay(this::expireSessions, 30, 30, TimeUnit.SECONDS);
@@ -237,6 +247,8 @@ public class ArtifactDialogs implements AutoCloseable {
         }
         s.userMessages.add(messageId);
         s.lastActivity = Instant.now();
+        // The reply pushed the panel up (on phones — behind the keyboard): show the next step below it
+        s.repost = true;
 
         try {
             String t = text.trim();
@@ -715,7 +727,8 @@ public class ArtifactDialogs implements AutoCloseable {
         List<InlineKeyboardButton> buttons = new ArrayList<>();
         for (Person p : candidates) {
             boolean selected = inRole.stream().anyMatch(a -> Long.valueOf(p.userId()).equals(a.userId()));
-            buttons.add(button((selected ? "✅ " : "") + p.name(), "u:" + p.userId()));
+            String tag = hasRoleTag(s, p) ? " · " + tagOf(s, p.userId()) : "";
+            buttons.add(button((selected ? "✅ " : "") + p.name() + tag, "u:" + p.userId()));
         }
         // Names typed by hand: shown as selected, a press removes them
         inRole.stream().filter(a -> a.userId() == null)
@@ -744,7 +757,8 @@ public class ArtifactDialogs implements AutoCloseable {
         }
         rows.add(row(button("✍️ Ввести вручную", "man"), button("✅ Готово", "roles")));
 
-        render(s, teamHeader(s) + "Роль: <b>" + Html.escape(s.role) + "</b>\n"
+        String tagHint = roleTag(s) != null ? "Сначала — участники с тегом " + Html.escape(roleTag(s)) + ".\n" : "";
+        render(s, teamHeader(s) + "Роль: <b>" + Html.escape(s.role) + "</b>\n" + tagHint
                         + "Нажмите на человека, чтобы добавить его; ✅ — уже добавлен, повторное нажатие убирает.\n"
                         + "<i>Бот знает только админов и тех, кто писал в чат; остальных — «Ввести вручную».</i>",
                 keyboard(rows));
@@ -762,9 +776,30 @@ public class ArtifactDialogs implements AutoCloseable {
         repo.assignees(s.epic.id()).stream()
                 .filter(a -> a.role().equals(s.role) && a.userId() != null && !byId.containsKey(a.userId()))
                 .forEach(a -> byId.put(a.userId(), new Person(a.userId(), a.name(), null)));
+        // Members whose tag matches the role (BA for БА, …) go first, then everyone else by name
         List<Person> result = new ArrayList<>(byId.values());
-        result.sort(Comparator.comparing(Person::name, String.CASE_INSENSITIVE_ORDER));
+        result.sort(Comparator.comparing((Person p) -> !hasRoleTag(s, p))
+                .thenComparing(Person::name, String.CASE_INSENSITIVE_ORDER));
         return result;
+    }
+
+    /** Tag that corresponds to the current role (БА -> BA), or null if the role has none. */
+    private String roleTag(Session s) {
+        return s.role == null ? null : roleTags.get(s.role);
+    }
+
+    private boolean hasRoleTag(Session s, Person p) {
+        String wanted = roleTag(s);
+        return wanted != null && wanted.equalsIgnoreCase(tagOf(s, p.userId()));
+    }
+
+    /** Member tag, looked up once per dialog (Telegram asks one member at a time). */
+    private String tagOf(Session s, long userId) {
+        String tag = s.tags.computeIfAbsent(userId, id -> {
+            String t = chat.memberTag(s.chatId, id);
+            return t == null ? "" : t;
+        });
+        return tag.isEmpty() ? null : tag;
     }
 
     private void toggleAssignee(Session s, long userId) {
@@ -959,7 +994,15 @@ public class ArtifactDialogs implements AutoCloseable {
             text = text + "\n\n" + Html.escape(s.notice);
             s.notice = null;
         }
-        chat.edit(s.chatId, s.panelId, text, keyboard);
+        if (s.repost) {
+            // After a text reply the panel is above it: send it anew at the bottom instead of editing in place
+            s.repost = false;
+            int old = s.panelId;
+            s.panelId = chat.send(s.chatId, text, keyboard);
+            chat.delete(s.chatId, old);
+        } else {
+            chat.edit(s.chatId, s.panelId, text, keyboard);
+        }
     }
 
     // ------------------------------------------------------------------ lifecycle

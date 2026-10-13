@@ -23,4 +23,7 @@ public interface ChatApi {
 
     /** Human administrators of the chat (empty on failure). */
     List<Person> administrators(long chatId);
+
+    /** Member tag in the chat (custom title for administrators); null if none or unknown. */
+    String memberTag(long chatId, long userId);
 }
