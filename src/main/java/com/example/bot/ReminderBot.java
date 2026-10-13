@@ -186,7 +186,8 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
         }
         if (!command.startsWith("/")) {
             if (artifacts != null && message.getFrom() != null) {
-                artifacts.onText(chatId, message.getFrom(), message.getMessageId(), message.getText());
+                artifacts.onText(chatId, message.getFrom(), message.getMessageId(), message.getText(),
+                        message.getEntities() != null ? message.getEntities() : List.of());
             }
             return;
         }

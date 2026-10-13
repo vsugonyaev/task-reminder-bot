@@ -6,12 +6,12 @@ import com.example.util.Html;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
+import org.telegram.telegrambots.meta.api.objects.MessageEntity;
 import org.telegram.telegrambots.meta.api.objects.User;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardRow;
 
-import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -96,6 +96,10 @@ public class ArtifactDialogs implements AutoCloseable {
         String type;
         Long artifactId;
         String pendingUrl;
+        /** Title found next to the link (text around it or the text of a hidden link). */
+        String suggestedTitle;
+        /** What "Оставить «…»" on the title step saves. */
+        String titleDefault;
 
         /** Assignees step of a just created epic: continue to the type choice afterwards. */
         boolean teamThenTypes;
@@ -220,6 +224,11 @@ public class ArtifactDialogs implements AutoCloseable {
 
     /** Returns true if the message was consumed by a dialog waiting for text input. */
     public synchronized boolean onText(long chatId, User from, int messageId, String text) {
+        return onText(chatId, from, messageId, text, List.of());
+    }
+
+    /** Entities let a link be taken from Telegram markup, e.g. text with a hidden link copied from a browser. */
+    public synchronized boolean onText(long chatId, User from, int messageId, String text, List<MessageEntity> entities) {
         Session s = sessions.get(key(chatId, from.getId()));
         if (s == null || !TEXT_STEPS.contains(s.step)) {
             return false;
@@ -230,7 +239,7 @@ public class ArtifactDialogs implements AutoCloseable {
         try {
             String t = text.trim();
             switch (s.step) {
-                case LINK_INPUT -> onLink(s, t);
+                case LINK_INPUT -> onLink(s, t, entities);
                 case TITLE_INPUT -> saveArtifact(s, t);
                 case RENAME_INPUT -> onRename(s, t);
                 case TEAM_MANUAL -> onManualAssignee(s, t);
@@ -358,7 +367,7 @@ public class ArtifactDialogs implements AutoCloseable {
             }
             case "keep" -> {
                 if (s.step == Step.TITLE_INPUT) {
-                    saveArtifact(s, defaultTitle(s));
+                    saveArtifact(s, s.titleDefault != null ? s.titleDefault : defaultTitle(s));
                 }
             }
             case "del" -> {
@@ -519,23 +528,27 @@ public class ArtifactDialogs implements AutoCloseable {
         render(s, text.toString(), keyboard(row(cancelButton())));
     }
 
-    private void onLink(Session s, String url) {
-        if (!isUrl(url)) {
-            s.notice = "❗ Это не похоже на ссылку. Нужна ссылка вида https://…";
+    private void onLink(Session s, String text, List<MessageEntity> entities) {
+        LinkInput link = LinkInput.extract(text, entities);
+        if (link == null) {
+            log.info("Dialog {}: no link found in a message from {}: {}", s.kind, s.user,
+                    text.length() > 120 ? text.substring(0, 120) + "…" : text);
+            s.notice = "❗ Не нашёл в сообщении ссылку. Пришлите адрес документа, например https://wiki…/pages/…";
             askLink(s);
             return;
         }
-        s.pendingUrl = url;
+        s.pendingUrl = link.url();
+        s.suggestedTitle = link.title() != null && link.title().length() <= MAX_TITLE ? link.title() : null;
         askTitle(s);
     }
 
     private void askTitle(Session s) {
         s.step = Step.TITLE_INPUT;
-        String def = defaultTitle(s);
+        s.titleDefault = s.suggestedTitle != null ? s.suggestedTitle : defaultTitle(s);
         render(s, header(s) + "Ссылка: " + Html.link(s.pendingUrl, shortUrl(s.pendingUrl)) + "\n\n"
                         + "Как назвать её в списке? Пришлите название, например «" + Html.escape(s.type)
                         + " ВТБО» или «Макеты ИБ Figma».",
-                keyboard(row(button("Оставить «" + def + "»", "keep")), row(cancelButton())));
+                keyboard(row(button("Оставить «" + s.titleDefault + "»", "keep")), row(cancelButton())));
     }
 
     /** Current title when replacing a link, otherwise the type. */
@@ -983,19 +996,6 @@ public class ArtifactDialogs implements AutoCloseable {
     private static String userLabel(User u) {
         String name = u.getUserName() != null ? "@" + u.getUserName() : displayName(u);
         return name + " (" + u.getId() + ")";
-    }
-
-    static boolean isUrl(String text) {
-        if (text.isEmpty() || text.chars().anyMatch(Character::isWhitespace)) {
-            return false;
-        }
-        try {
-            URI uri = URI.create(text);
-            return ("https".equalsIgnoreCase(uri.getScheme()) || "http".equalsIgnoreCase(uri.getScheme()))
-                    && uri.getHost() != null;
-        } catch (IllegalArgumentException e) {
-            return false;
-        }
     }
 
     private static String titledLink(Artifact a) {
