@@ -69,7 +69,7 @@ public class ArtifactDialogs implements AutoCloseable {
     private enum Step {
         EPIC_SELECT, EPIC_CONFIRM, TYPE_SELECT, MODE_SELECT, REPLACE_SELECT, LINK_INPUT, TITLE_INPUT,
         ARTIFACT_SELECT, ACTION_SELECT, RENAME_INPUT, DELETE_CONFIRM, ARCHIVE_CONFIRM, CLEANUP_CONFIRM,
-        TEAM_ROLES, TEAM_PEOPLE, TEAM_MANUAL
+        TEAM_ROLES, TEAM_PEOPLE, TEAM_MANUAL, ADD_MORE
     }
 
     /** Steps that wait for a text message from the dialog author. */
@@ -100,6 +100,8 @@ public class ArtifactDialogs implements AutoCloseable {
         String suggestedTitle;
         /** What "Оставить «…»" on the title step saves. */
         String titleDefault;
+        /** Links saved in this /artifact_add dialog, for the final summary. */
+        final List<String> savedLines = new ArrayList<>();
 
         /** Assignees step of a just created epic: continue to the type choice afterwards. */
         boolean teamThenTypes;
@@ -296,6 +298,11 @@ public class ArtifactDialogs implements AutoCloseable {
     private void onAction(Session s, String action, String arg) {
         switch (action) {
             case "x" -> {
+                if (!s.savedLines.isEmpty()) {
+                    // Cancelled the next artifact: the ones already saved still deserve a summary
+                    finishAdding(s);
+                    return;
+                }
                 cleanup(s);
                 log.info("Dialog {} cancelled by {}", s.kind, s.user);
             }
@@ -395,6 +402,17 @@ public class ArtifactDialogs implements AutoCloseable {
                     repo.archiveEpic(s.epic.id(), s.user);
                     finish(s, "📦 Эпик <b>" + Html.escape(s.epic.title()) + "</b> отправлен в архив.\n"
                             + "Документы по нему — в /artifacts_archive");
+                }
+            }
+            case "more" -> {
+                if (s.step == Step.ADD_MORE) {
+                    s.step = Step.TYPE_SELECT;
+                    renderTypeSelect(s);
+                }
+            }
+            case "done" -> {
+                if (s.step == Step.ADD_MORE) {
+                    finishAdding(s);
                 }
             }
             // --- assignees ---
@@ -580,8 +598,27 @@ public class ArtifactDialogs implements AutoCloseable {
         } else {
             repo.addArtifact(s.epic.id(), s.type, title, s.pendingUrl, s.user);
         }
-        finish(s, "✅ <b>" + Html.escape(s.epic.title()) + "</b>\n"
-                + "➡️" + Html.link(s.pendingUrl, title) + (replace ? " — ссылка заменена" : " — добавлено"));
+        String line = "➡️" + Html.link(s.pendingUrl, title) + (replace ? " — ссылка заменена" : " — добавлено");
+
+        if (s.kind != Kind.ADD) {
+            finish(s, "✅ <b>" + Html.escape(s.epic.title()) + "</b>\n" + line);
+            return;
+        }
+        // Adding is usually done for several documents at once: offer the next one right away
+        s.savedLines.add(line);
+        s.type = null;
+        s.artifactId = null;
+        s.pendingUrl = null;
+        s.suggestedTitle = null;
+        s.step = Step.ADD_MORE;
+        render(s, "📎 <b>" + Html.escape(s.epic.title()) + "</b>\n\n✅ " + line + "\n\n"
+                        + "Добавить ещё артефакт к этому эпику?",
+                keyboard(row(button("➕ Ещё артефакт", "more"), button("✅ Готово", "done"))));
+    }
+
+    /** End of /artifact_add: one summary of everything saved in this dialog. */
+    private void finishAdding(Session s) {
+        finish(s, "✅ <b>" + Html.escape(s.epic.title()) + "</b>\n" + String.join("\n", s.savedLines));
     }
 
     private void onRename(Session s, String title) {
