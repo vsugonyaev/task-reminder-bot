@@ -26,6 +26,7 @@ import org.telegram.telegrambots.meta.api.objects.message.Message;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardRow;
+import org.telegram.telegrambots.meta.exceptions.TelegramApiRequestException;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.meta.generics.TelegramClient;
 
@@ -262,8 +263,71 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
         sendMeetingReminder(chatId, meeting);
     }
 
+    // --- Retries of scheduled sends on network failures ---
+
+    /** No retries: commands are handled on the single update thread, which must not sleep. */
+    static final List<Duration> NO_RETRIES = List.of();
+    /** Scheduled reminders: retry for ~15 minutes — a late reminder is better than a lost one. */
+    static final List<Duration> SCHEDULED_RETRIES = List.of(Duration.ofSeconds(15), Duration.ofSeconds(30),
+            Duration.ofMinutes(1), Duration.ofMinutes(2), Duration.ofMinutes(4), Duration.ofMinutes(8));
+    /** A meeting reminder is useless once the meeting has started: retry for ~2 minutes. */
+    static final List<Duration> MEETING_RETRIES = List.of(Duration.ofSeconds(10), Duration.ofSeconds(20),
+            Duration.ofSeconds(30), Duration.ofSeconds(60));
+    /** Unpin / delete of old messages. */
+    static final List<Duration> CLEANUP_RETRIES = List.of(Duration.ofSeconds(30), Duration.ofMinutes(1),
+            Duration.ofMinutes(2));
+
+    @FunctionalInterface
+    private interface TelegramCall<T> {
+        T call() throws TelegramApiException;
+    }
+
+    /**
+     * Runs a Telegram call, retrying after the given delays on network failures and on Telegram-side
+     * errors (429, 5xx). Other errors from Telegram (no rights, bad request) are not retried.
+     */
+    private <T> T withRetries(String action, List<Duration> delays, TelegramCall<T> call) throws TelegramApiException {
+        for (int attempt = 0; ; attempt++) {
+            try {
+                return call.call();
+            } catch (TelegramApiException e) {
+                if (attempt >= delays.size() || !isRetryable(e)) {
+                    throw e;
+                }
+                Duration delay = delays.get(attempt);
+                log.warn("{} failed ({}), retry {}/{} in {}", action, rootMessage(e), attempt + 1, delays.size(), delay);
+                try {
+                    Thread.sleep(delay.toMillis());
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            }
+        }
+    }
+
+    private static boolean isRetryable(TelegramApiException e) {
+        if (e instanceof TelegramApiRequestException r) {
+            Integer code = r.getErrorCode();
+            return code != null && (code == 429 || code >= 500);
+        }
+        return true; // no answer from Telegram: timeout, no network
+    }
+
+    private static String rootMessage(Throwable e) {
+        Throwable root = e;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        return root.getClass().getSimpleName() + ": " + root.getMessage();
+    }
+
     /** Sends a meeting reminder with a button to join; deletes it after meeting.delete-after-minutes. */
     public void sendMeetingReminder(long chatId, Meeting meeting) {
+        sendMeetingReminder(chatId, meeting, NO_RETRIES);
+    }
+
+    public void sendMeetingReminder(long chatId, Meeting meeting, List<Duration> retries) {
         String text = ReminderTexts.meeting(meeting, config.meetingTeam(), config.meetingRemindBefore());
         InlineKeyboardMarkup joinButton = InlineKeyboardMarkup.builder()
                 .keyboardRow(new InlineKeyboardRow(InlineKeyboardButton.builder()
@@ -280,7 +344,7 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
                 .replyMarkup(joinButton)
                 .build();
         try {
-            int messageId = client.execute(msg).getMessageId();
+            int messageId = withRetries("Meeting reminder", retries, () -> client.execute(msg)).getMessageId();
             scheduleMessageJob(DeleteJob.class, "delete", chatId, messageId, config.meetingDeleteAfter());
         } catch (TelegramApiException e) {
             throw new RuntimeException("Failed to send meeting reminder", e);
@@ -361,13 +425,17 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
     }
 
     public int sendAndGetMessageId(long chatId, String text) {
+        return sendAndGetMessageId(chatId, text, NO_RETRIES);
+    }
+
+    private int sendAndGetMessageId(long chatId, String text, List<Duration> retries) {
         SendMessage msg = SendMessage.builder()
                 .chatId(String.valueOf(chatId))
                 .text(text)
                 .parseMode("HTML")
                 .build();
         try {
-            Message sent = client.execute(msg);
+            Message sent = withRetries("Send message", retries, () -> client.execute(msg));
             return sent.getMessageId();
         } catch (TelegramApiException e) {
             throw new RuntimeException("Failed to send message", e);
@@ -375,23 +443,28 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
     }
 
     public void pinMessage(long chatId, int messageId) {
+        pinMessage(chatId, messageId, NO_RETRIES);
+    }
+
+    private void pinMessage(long chatId, int messageId, List<Duration> retries) {
         try {
-            client.execute(PinChatMessage.builder()
+            withRetries("Pin", retries, () -> client.execute(PinChatMessage.builder()
                     .chatId(String.valueOf(chatId))
                     .messageId(messageId)
                     .disableNotification(true)
-                    .build());
+                    .build()));
         } catch (TelegramApiException e) {
             throw new RuntimeException("Failed to pin message", e);
         }
     }
 
+    /** Called from UnpinJob (a Quartz thread), so it may wait for retries. */
     public void unpinMessage(long chatId, int messageId) {
         try {
-            client.execute(UnpinChatMessage.builder()
+            withRetries("Unpin", CLEANUP_RETRIES, () -> client.execute(UnpinChatMessage.builder()
                     .chatId(String.valueOf(chatId))
                     .messageId(messageId)
-                    .build());
+                    .build()));
             log.info("Unpinned: chatId={}, messageId={}", chatId, messageId);
         } catch (TelegramApiException e) {
             log.error("Failed to unpin: chatId={}, messageId={}", chatId, messageId, e);
@@ -458,11 +531,16 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
     }
 
     public void deleteMessage(long chatId, int messageId) {
+        deleteMessage(chatId, messageId, NO_RETRIES);
+    }
+
+    /** With retries — only from Quartz jobs (DeleteJob), never on the update thread. */
+    public void deleteMessage(long chatId, int messageId, List<Duration> retries) {
         try {
-            client.execute(DeleteMessage.builder()
+            withRetries("Delete", retries, () -> client.execute(DeleteMessage.builder()
                     .chatId(String.valueOf(chatId))
                     .messageId(messageId)
-                    .build());
+                    .build()));
             log.info("Deleted: chatId={}, messageId={}", chatId, messageId);
         } catch (TelegramApiException e) {
             // Usually the message was already deleted by someone — not worth a stack trace
@@ -470,9 +548,13 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
         }
     }
 
+    /**
+     * Scheduled reminder: send, pin, unpin later. Called from Quartz jobs, so network failures are retried;
+     * if the pin fails after the message was sent, only the pin is retried — the message is not duplicated.
+     */
     public void sendPinAndAutoUnpin(long chatId, String text, Duration pinDuration) {
-        int messageId = sendAndGetMessageId(chatId, text);
-        pinMessage(chatId, messageId);
+        int messageId = sendAndGetMessageId(chatId, text, SCHEDULED_RETRIES);
+        pinMessage(chatId, messageId, SCHEDULED_RETRIES);
         scheduleMessageJob(UnpinJob.class, "unpin", chatId, messageId, pinDuration);
     }
 

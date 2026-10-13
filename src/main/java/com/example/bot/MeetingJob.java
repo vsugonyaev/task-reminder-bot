@@ -33,7 +33,7 @@ public class MeetingJob implements Job {
                 return;
             }
 
-            bot.sendMeetingReminder(config.chatId(), config.meetings().get(type));
+            bot.sendMeetingReminder(config.chatId(), config.meetings().get(type), ReminderBot.MEETING_RETRIES);
         } catch (Exception e) {
             log.error("Failed to send meeting reminder", e);
         }

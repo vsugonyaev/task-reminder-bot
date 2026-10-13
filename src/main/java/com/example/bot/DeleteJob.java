@@ -19,7 +19,7 @@ public class DeleteJob implements Job {
             long chatId = context.getMergedJobDataMap().getLong("chatId");
             int messageId = context.getMergedJobDataMap().getInt("messageId");
 
-            bot.deleteMessage(chatId, messageId);
+            bot.deleteMessage(chatId, messageId, ReminderBot.CLEANUP_RETRIES);
         } catch (Exception e) {
             log.error("Failed to delete message", e);
         }
