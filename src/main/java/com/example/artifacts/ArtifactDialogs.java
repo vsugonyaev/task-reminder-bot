@@ -692,10 +692,10 @@ public class ArtifactDialogs implements AutoCloseable {
                     button((s.peoplePage + 1) + " / " + pages, "n"),
                     button(s.peoplePage < pages - 1 ? "▶️" : "·", s.peoplePage < pages - 1 ? "pp:" + (s.peoplePage + 1) : "n")));
         }
-        rows.add(row(button("✍️ Ввести вручную", "man"), button("◀️ К ролям", "roles")));
+        rows.add(row(button("✍️ Ввести вручную", "man"), button("✅ Готово", "roles")));
 
         render(s, teamHeader(s) + "Роль: <b>" + Html.escape(s.role) + "</b>\n"
-                        + "Нажмите на человека, чтобы добавить или убрать его.\n"
+                        + "Нажмите на человека, чтобы добавить его; ✅ — уже добавлен, повторное нажатие убирает.\n"
                         + "<i>Бот знает только админов и тех, кто писал в чат; остальных — «Ввести вручную».</i>",
                 keyboard(rows));
     }
@@ -743,19 +743,19 @@ public class ArtifactDialogs implements AutoCloseable {
             onAction(s, "man", "");
             return;
         }
-        if (text.startsWith("@")) {
-            String username = text.substring(1);
-            Optional<Person> known = candidates(s).stream()
-                    .filter(p -> p.username() != null && p.username().equalsIgnoreCase(username))
-                    .findFirst();
-            if (known.isPresent()) {
-                repo.addAssignee(s.epic.id(), s.role, known.get().userId(), known.get().name(), s.user);
-                showTeamPeople(s);
-                return;
-            }
-        }
-        repo.addAssignee(s.epic.id(), s.role, null, text, s.user);
-        showTeamPeople(s);
+        // A known member by @username or by exactly the same name — link the person, don't create a text duplicate
+        String username = text.startsWith("@") ? text.substring(1) : null;
+        Optional<Person> known = candidates(s).stream()
+                .filter(p -> username != null
+                        ? p.username() != null && p.username().equalsIgnoreCase(username)
+                        : p.name().equalsIgnoreCase(text))
+                .findFirst();
+        String name = known.map(Person::name).orElse(text);
+        repo.addAssignee(s.epic.id(), s.role, known.map(Person::userId).orElse(null), name, s.user);
+
+        // Back to the roles: the step is clearly done (staying on the list invited a press that removed the person)
+        s.notice = "✅ " + name + " — " + s.role;
+        showTeamRoles(s);
     }
 
     private String teamHeader(Session s) {
