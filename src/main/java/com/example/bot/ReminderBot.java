@@ -96,7 +96,7 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
         this.sprints = sprints;
         this.access = new AccessControl(client, config.accessRules());
         this.artifacts = artifactRepository == null ? null : new ArtifactDialogs(this, artifactRepository,
-                new EpicMatcher(config.epicKeyPrefixes()), config.artifactTypes(), config.artifactRoles(), config.artifactRoleTags(),
+                new EpicMatcher(config.epicKeyPrefix()), config.artifactTypes(), config.artifactRoles(), config.artifactRoleTags(),
                 config.artifactResultTtl(), config.artifactDialogTimeout(), access, config.testChatIds());
     }
 

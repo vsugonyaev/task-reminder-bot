@@ -647,6 +647,13 @@ public class ArtifactDialogs implements AutoCloseable {
     private void onEpicText(Session s, String text) {
         EpicMatcher.ParsedEpic parsed = matcher.parse(text);
 
+        if (s.kind == Kind.ADD && matcher.foreignPrefix(text) != null) {
+            s.notice = "❗ Эпики только из " + matcher.prefix() + ". Пришлите номер эпика и название, например: 123 Название — "
+                    + matcher.prefix() + "- бот подставит сам.";
+            renderEpicSelect(s);
+            return;
+        }
+
         if (s.kind == Kind.ADD && parsed != null) {
             Optional<Epic> existing = repo.epicByKey(s.chatId, parsed.key());
             if (existing.isPresent()) {
@@ -659,8 +666,8 @@ public class ArtifactDialogs implements AutoCloseable {
                 return;
             }
             if (parsed.name() == null) {
-                s.notice = "Эпика " + parsed.key() + " ещё нет. Чтобы создать, пришлите ключ вместе с названием: "
-                        + parsed.key() + " Название";
+                s.notice = "Эпика " + parsed.key() + " ещё нет. Чтобы создать, пришлите номер вместе с названием: "
+                        + parsed.key().substring(parsed.key().indexOf('-') + 1) + " Название";
                 renderEpicSelect(s);
                 return;
             }
@@ -697,7 +704,8 @@ public class ArtifactDialogs implements AutoCloseable {
         s.page = 0;
         s.step = Step.EPIC_SELECT;
         if (found.isEmpty() && s.kind == Kind.ADD) {
-            s.notice = "Чтобы создать новый эпик, пришлите ключ и название: STRLPL-123 Название";
+            s.notice = "Чтобы создать новый эпик, пришлите номер и название: 123 Название — "
+                    + matcher.prefix() + "- бот подставит сам.";
         }
         renderEpicSelect(s);
     }
@@ -871,8 +879,9 @@ public class ArtifactDialogs implements AutoCloseable {
     private String epicSelectText(Session s) {
         String hint = "Выберите эпик или пришлите номер / часть названия для поиска.";
         StringBuilder text = new StringBuilder(switch (s.kind) {
-            case ADD -> "📎 <b>Добавление артефакта</b>\nВыберите эпик или пришлите ключ и название нового:\n"
-                    + "<code>STRLPL-123 Название эпика</code>\nМожно прислать номер или часть названия — поищу.";
+            case ADD -> "📎 <b>Добавление артефакта</b>\nВыберите эпик или пришлите номер и название нового:\n"
+                    + "<code>123 Название эпика</code> — " + matcher.prefix() + "- бот подставит сам.\n"
+                    + "Можно прислать номер или часть названия — поищу среди существующих.";
             case EDIT -> "✏️ <b>Изменение артефактов и исполнителей</b>\n" + hint;
             case VIEW -> "📂 <b>Артефакты эпика</b>\n" + hint;
             case VIEW_ARCHIVED -> "🗄 <b>Архив эпиков</b>\n" + hint;
@@ -950,7 +959,7 @@ public class ArtifactDialogs implements AutoCloseable {
         return title.toLowerCase().startsWith(a.type().toLowerCase()) ? title : a.type() + " · " + title;
     }
 
-    /** "📎 STRLPL-123 · Name · СТ", ending with an empty line. */
+    /** "📎 STRLP-123 · Name · СТ", ending with an empty line. */
     private String header(Session s) {
         StringBuilder sb = new StringBuilder(switch (s.kind) {
             case EDIT -> "✏️ ";
@@ -964,7 +973,7 @@ public class ArtifactDialogs implements AutoCloseable {
     }
 
     /**
-     * 📂 STRLPL-101 · Name
+     * 📂 STRLP-101 · Name
      *
      * БА - Алина Мамонтова
      * Дизайн - Олег Кудряшов, Алина Султанова

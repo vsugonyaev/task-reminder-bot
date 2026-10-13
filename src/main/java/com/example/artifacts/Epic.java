@@ -4,12 +4,12 @@ import java.time.Instant;
 import java.util.Comparator;
 
 /**
- * Epic identified by a Jira-like key (STRLPL-123) plus a human-readable name.
+ * Epic identified by a Jira-like key (STRLP-123) plus a human-readable name.
  * Belongs to the chat it was created in: each chat (work, test) has its own epics.
  */
 public record Epic(long id, long chatId, String key, String name, Instant archivedAt) {
 
-    /** STRLPL-2 &lt; STRLPL-10 &lt; STRLPDML-1: by prefix, then by number. */
+    /** STRLP-2 &lt; STRLP-10: by prefix, then by number. */
     public static final Comparator<Epic> BY_KEY = Comparator
             .comparing((Epic e) -> e.prefix())
             .thenComparingLong(Epic::number);
@@ -32,7 +32,7 @@ public record Epic(long id, long chatId, String key, String name, Instant archiv
         }
     }
 
-    /** "STRLPL-123 · Name" */
+    /** "STRLP-123 · Name" */
     public String title() {
         return key + " · " + name;
     }

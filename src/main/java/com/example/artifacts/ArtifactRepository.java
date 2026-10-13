@@ -30,6 +30,7 @@ public class ArtifactRepository implements AutoCloseable {
     private final Connection connection;
 
     private static final Map<String, String> LEGACY_TYPES = Map.of("SA", "СТ", "BA", "БТ");
+    private static final List<String> LEGACY_KEY_PREFIXES = List.of("STRLPL", "STRLPDML");
 
     private static final String EPICS_DDL = """
             CREATE TABLE %s (
@@ -87,6 +88,11 @@ public class ArtifactRepository implements AutoCloseable {
                 addColumnIfMissing("artifact_history", "new_title", "TEXT");
                 // SA/BA became roles of people; their documents are СТ/БТ
                 LEGACY_TYPES.forEach((from, to) -> update("UPDATE artifacts SET type = ? WHERE type = ?", to, from));
+                // All epics are STRLP now: STRLPL-12 / STRLPDML-12 -> STRLP-12 (a clash keeps the old key)
+                for (String old : LEGACY_KEY_PREFIXES) {
+                    update("UPDATE OR IGNORE epics SET key = 'STRLP-' || substr(key, length(?) + 2) WHERE key LIKE ? || '-%'",
+                            old, old);
+                }
                 // People assigned to an epic by role (БА, СА, Дизайн); user_id is null for names typed by hand
                 st.execute("""
                         CREATE TABLE IF NOT EXISTS epic_members (

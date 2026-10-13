@@ -57,7 +57,8 @@ public record AppConfig(
         List<String> artifactRoles,
         /** Role -> member tag offered first when choosing assignees (БА -> BA). */
         Map<String, String> artifactRoleTags,
-        List<String> epicKeyPrefixes,
+        /** Prefix the bot adds to epic numbers: "123" -> "STRLP-123". */
+        String epicKeyPrefix,
         Duration artifactResultTtl,
         Duration artifactDialogTimeout,
         /** Chats where test commands (/test) work; never the work chat. */
@@ -92,7 +93,7 @@ public record AppConfig(
             Map.entry("artifacts.types", "БТ, СТ, Макеты, ТПиС, ПТР, ПМИ, ПСИ, ТКР, ТИС, АР, АИС, Тест-план к4"),
             Map.entry("artifacts.roles", "БА, СА, Дизайн"),
             Map.entry("artifacts.role-tags", "БА=BA, СА=SA, Дизайн=Design"),
-            Map.entry("artifacts.epic-key-prefixes", "STRLPL, STRLPDML"),
+            Map.entry("artifacts.epic-key-prefix", "STRLP"),
             Map.entry("artifacts.result-delete-minutes", "5"),
             Map.entry("artifacts.dialog-timeout-minutes", "10"),
             Map.entry("telegram.test-chat-ids", ""),
@@ -151,7 +152,7 @@ public record AppConfig(
                 required(props, "artifacts.types", AppConfig::list),
                 required(props, "artifacts.roles", AppConfig::list),
                 required(props, "artifacts.role-tags", AppConfig::pairs),
-                required(props, "artifacts.epic-key-prefixes", AppConfig::list),
+                required(props, "artifacts.epic-key-prefix", AppConfig::keyPrefix),
                 required(props, "artifacts.result-delete-minutes", v -> Duration.ofMinutes(positiveInt(v))),
                 required(props, "artifacts.dialog-timeout-minutes", v -> Duration.ofMinutes(positiveInt(v))),
                 testChatIds(props),
@@ -248,6 +249,14 @@ public record AppConfig(
         };
     }
 
+    /** Latin letters only, as in Jira keys. */
+    private static String keyPrefix(String value) {
+        if (!value.matches("[A-Za-z]+")) {
+            throw new IllegalArgumentException("expected Latin letters, e.g. STRLP");
+        }
+        return value.toUpperCase(java.util.Locale.ROOT);
+    }
+
     /** "a=1, b=2" -> {a=1, b=2} (in order). */
     private static Map<String, String> pairs(String value) {
         Map<String, String> result = new java.util.LinkedHashMap<>();
@@ -293,7 +302,7 @@ public record AppConfig(
                 + ", meetingDeleteAfter=" + meetingDeleteAfter + ", meetings=" + meetings.values()
                 + ", commandsDeleteAfter=" + commandsDeleteAfter + ", artifactsEnabled=" + artifactsEnabled
                 + ", artifactsDbPath=" + artifactsDbPath + ", artifactTypes=" + artifactTypes + ", artifactRoles=" + artifactRoles + ", artifactRoleTags=" + artifactRoleTags
-                + ", epicKeyPrefixes=" + epicKeyPrefixes + ", artifactResultTtl=" + artifactResultTtl
+                + ", epicKeyPrefix=" + epicKeyPrefix + ", artifactResultTtl=" + artifactResultTtl
                 + ", artifactDialogTimeout=" + artifactDialogTimeout
                 + ", testChatIds=" + testChatIds + ", accessRules=" + accessRules + "]";
     }

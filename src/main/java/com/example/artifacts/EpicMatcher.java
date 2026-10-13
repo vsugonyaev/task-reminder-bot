@@ -7,36 +7,57 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 /**
- * Parses "STRLPL-123 Название" input and finds epics similar by name or by number.
+ * Parses epic input and finds epics similar by name or by number.
+ *
+ * Users send just the number and the name ("123 Кешбэк в лесенке"); the key prefix (STRLP) is added by the bot.
+ * "STRLP-123 Название" is accepted too; any other prefix ("ABC-12", the old "STRLPL-12") is reported as foreign.
  */
 public class EpicMatcher {
 
-    /** Parsed user input; name is null when only the key was given. */
+    /** Parsed user input; name is null when only the number was given. */
     public record ParsedEpic(String key, String name) {}
 
     private static final double MIN_SCORE = 0.5;
     private static final int MAX_RESULTS = 8;
     private static final Pattern NUMBER = Pattern.compile("\\d{2,}");
+    /** A Jira-like key at the start: "ABC-12…", "STRLPL-12…" (Latin letters and a dash, so "Кешбэк 2026" is not one). */
+    private static final Pattern ANY_PREFIX = Pattern.compile("^\\s*([A-Za-z]+)\\s*-\\s*\\d+");
 
+    private final String prefix;
     private final Pattern keyPattern;
 
-    public EpicMatcher(List<String> keyPrefixes) {
-        String prefixes = keyPrefixes.stream().map(Pattern::quote).collect(Collectors.joining("|"));
-        // "STRLPL-123 Name", "strlpl 123 — Name", "STRLPL-123: Name", "STRLPL-123"
-        keyPattern = Pattern.compile("^\\s*(" + prefixes + ")\\s*[-–—]?\\s*(\\d+)(?:[\\s\\-–—:.]+(.+?))?\\s*$",
+    public EpicMatcher(String keyPrefix) {
+        this.prefix = keyPrefix.toUpperCase(Locale.ROOT);
+        // "123 Name", "123 — Name", "123: Name", "123", and the same with "STRLP-" / "strlp " in front
+        keyPattern = Pattern.compile("^\\s*(?:" + Pattern.quote(prefix) + "\\s*[-–—]?\\s*)?(\\d+)(?:[\\s\\-–—:.]+(.+?))?\\s*$",
                 Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     }
 
+    public String prefix() {
+        return prefix;
+    }
+
     public ParsedEpic parse(String text) {
+        if (foreignPrefix(text) != null) {
+            return null;
+        }
         Matcher m = keyPattern.matcher(text);
         if (!m.matches()) {
             return null;
         }
-        String name = m.group(3) != null && !m.group(3).isBlank() ? m.group(3).trim() : null;
-        return new ParsedEpic(m.group(1).toUpperCase(Locale.ROOT) + "-" + m.group(2), name);
+        String name = m.group(2) != null && !m.group(2).isBlank() ? m.group(2).trim() : null;
+        return new ParsedEpic(prefix + "-" + Long.parseLong(m.group(1)), name);
+    }
+
+    /** The prefix of a key from another project ("ABC" in "ABC-12 Name"), or null. */
+    public String foreignPrefix(String text) {
+        Matcher m = ANY_PREFIX.matcher(text);
+        if (m.find() && !m.group(1).equalsIgnoreCase(prefix)) {
+            return m.group(1).toUpperCase(Locale.ROOT);
+        }
+        return null;
     }
 
     /** Epics whose number matches digits in the query or whose name is similar, best first. */
