@@ -57,6 +57,9 @@ public record AppConfig(
         List<String> artifactRoles,
         /** Role -> member tag offered first when choosing assignees (БА -> BA). */
         Map<String, String> artifactRoleTags,
+        /** Types whose links are per system ("СТ ВТБО", "СТ ВТБ Про"); other types have one link titled by type. */
+        List<String> artifactSystemTypes,
+        List<String> artifactSystems,
         /** Prefix the bot adds to epic numbers: "123" -> "STRLP-123". */
         String epicKeyPrefix,
         Duration artifactResultTtl,
@@ -93,6 +96,8 @@ public record AppConfig(
             Map.entry("artifacts.types", "БТ, СТ, Макеты, ТПиС, ПТР, ПМИ, ПСИ, ТКР, ТИС, АР, АИС, Тест-план к4"),
             Map.entry("artifacts.roles", "БА, СА, Дизайн"),
             Map.entry("artifacts.role-tags", "БА=BA, СА=SA, Дизайн=Design"),
+            Map.entry("artifacts.system-types", "СТ, Макеты"),
+            Map.entry("artifacts.systems", "ВТБО, ВТБ Про"),
             Map.entry("artifacts.epic-key-prefix", "STRLP"),
             Map.entry("artifacts.result-delete-minutes", "5"),
             Map.entry("artifacts.dialog-timeout-minutes", "10"),
@@ -152,6 +157,8 @@ public record AppConfig(
                 required(props, "artifacts.types", AppConfig::list),
                 required(props, "artifacts.roles", AppConfig::list),
                 required(props, "artifacts.role-tags", AppConfig::pairs),
+                required(props, "artifacts.system-types", AppConfig::list),
+                required(props, "artifacts.systems", AppConfig::list),
                 required(props, "artifacts.epic-key-prefix", AppConfig::keyPrefix),
                 required(props, "artifacts.result-delete-minutes", v -> Duration.ofMinutes(positiveInt(v))),
                 required(props, "artifacts.dialog-timeout-minutes", v -> Duration.ofMinutes(positiveInt(v))),
@@ -159,6 +166,11 @@ public record AppConfig(
                 accessRules(props),
                 fileFound ? path.toAbsolutePath() : null
         );
+        for (String t : config.artifactSystemTypes()) {
+            if (!config.artifactTypes().contains(t)) {
+                throw new IllegalStateException("artifacts.system-types: " + t + " is not in artifacts.types");
+            }
+        }
         if (config.testChatIds().contains(config.chatId())) {
             String env = System.getenv("TG_CHAT_ID");
             throw new IllegalStateException("telegram.test-chat-ids must not contain the work chat " + config.chatId()
@@ -301,7 +313,7 @@ public record AppConfig(
                 + ", meetingTeam=" + meetingTeam + ", meetingRemindBefore=" + meetingRemindBefore
                 + ", meetingDeleteAfter=" + meetingDeleteAfter + ", meetings=" + meetings.values()
                 + ", commandsDeleteAfter=" + commandsDeleteAfter + ", artifactsEnabled=" + artifactsEnabled
-                + ", artifactsDbPath=" + artifactsDbPath + ", artifactTypes=" + artifactTypes + ", artifactRoles=" + artifactRoles + ", artifactRoleTags=" + artifactRoleTags
+                + ", artifactsDbPath=" + artifactsDbPath + ", artifactTypes=" + artifactTypes + ", artifactRoles=" + artifactRoles + ", artifactRoleTags=" + artifactRoleTags + ", artifactSystemTypes=" + artifactSystemTypes + ", artifactSystems=" + artifactSystems
                 + ", epicKeyPrefix=" + epicKeyPrefix + ", artifactResultTtl=" + artifactResultTtl
                 + ", artifactDialogTimeout=" + artifactDialogTimeout
                 + ", testChatIds=" + testChatIds + ", accessRules=" + accessRules + "]";

@@ -67,21 +67,20 @@ public class ArtifactDialogs implements AutoCloseable {
     private static final int PEOPLE_PAGE_SIZE = 16;
     private static final int TYPES_PER_ROW = 3;
     private static final int MAX_BUTTON_TEXT = 48;
-    private static final int MAX_TITLE = 100;
     private static final int MAX_NAME = 64;
 
     /** ADD is /artifact_add — adding and editing artifacts of an epic. */
     private enum Kind { ADD, VIEW, VIEW_ARCHIVED, ARCHIVE, CLEANUP }
 
     private enum Step {
-        EPIC_SELECT, EPIC_CONFIRM, HUB, TYPE_SELECT, LINK_INPUT, TITLE_INPUT, ADD_MORE,
-        ACTION_SELECT, RENAME_INPUT, DELETE_CONFIRM, ARCHIVE_CONFIRM, CLEANUP_CONFIRM,
+        EPIC_SELECT, EPIC_CONFIRM, HUB, TYPE_SELECT, SYSTEM_SELECT, LINK_INPUT, ADD_MORE,
+        ACTION_SELECT, DELETE_CONFIRM, ARCHIVE_CONFIRM, CLEANUP_CONFIRM,
         TEAM_ROLES, TEAM_PEOPLE, TEAM_MANUAL
     }
 
     /** Steps that wait for a text message from the dialog author. */
     private static final Set<Step> TEXT_STEPS = Set.of(
-            Step.EPIC_SELECT, Step.EPIC_CONFIRM, Step.LINK_INPUT, Step.TITLE_INPUT, Step.RENAME_INPUT, Step.TEAM_MANUAL);
+            Step.EPIC_SELECT, Step.EPIC_CONFIRM, Step.LINK_INPUT, Step.TEAM_MANUAL);
 
     private static final class Session {
         final Kind kind;
@@ -103,10 +102,10 @@ public class ArtifactDialogs implements AutoCloseable {
         String type;
         Long artifactId;
         String pendingUrl;
-        /** Title found next to the link (text around it or the text of a hidden link). */
-        String suggestedTitle;
-        /** What "Оставить «…»" on the title step saves. */
-        String titleDefault;
+        /** Fixed title of the slot being filled: "БТ" or "СТ ВТБО". */
+        String pendingTitle;
+        /** The system choice changes the system of an existing СТ / Макеты link instead of adding one. */
+        boolean changingSystem;
         /** Changes made in this /artifact_add dialog, for the final summary. */
         final List<String> savedLines = new ArrayList<>();
         boolean teamEdited;
@@ -138,6 +137,9 @@ public class ArtifactDialogs implements AutoCloseable {
     private final List<String> types;
     private final List<String> roles;
     private final Map<String, String> roleTags;
+    /** Types whose links are per system (СТ, Макеты) and the systems (ВТБО, ВТБ Про). */
+    private final List<String> systemTypes;
+    private final List<String> systems;
     private final Duration resultTtl;
     private final Duration timeout;
     private final Map<String, Session> sessions = new HashMap<>();
@@ -151,7 +153,8 @@ public class ArtifactDialogs implements AutoCloseable {
      * @param roleTags role -> member tag whose owners are offered first as assignees (БА -> BA)
      */
     public ArtifactDialogs(ChatApi chat, ArtifactRepository repo, EpicMatcher matcher, List<String> types,
-                           List<String> roles, Map<String, String> roleTags, Duration resultTtl, Duration timeout,
+                           List<String> roles, Map<String, String> roleTags, List<String> systemTypes, List<String> systems,
+                           Duration resultTtl, Duration timeout,
                            PermissionChecker access, Set<Long> testChatIds) {
         this.chat = chat;
         this.testChatIds = Set.copyOf(testChatIds);
@@ -161,6 +164,8 @@ public class ArtifactDialogs implements AutoCloseable {
         this.types = List.copyOf(types);
         this.roles = List.copyOf(roles);
         this.roleTags = Map.copyOf(roleTags);
+        this.systemTypes = List.copyOf(systemTypes);
+        this.systems = List.copyOf(systems);
         this.resultTtl = resultTtl;
         this.timeout = timeout;
         sweeper.scheduleWithFixedDelay(this::expireSessions, 30, 30, TimeUnit.SECONDS);
@@ -260,8 +265,6 @@ public class ArtifactDialogs implements AutoCloseable {
             String t = text.trim();
             switch (s.step) {
                 case LINK_INPUT -> onLink(s, t, entities);
-                case TITLE_INPUT -> saveArtifact(s, t);
-                case RENAME_INPUT -> onRename(s, t);
                 case TEAM_MANUAL -> onManualAssignee(s, t);
                 default -> onEpicText(s, t);
             }
@@ -359,11 +362,8 @@ public class ArtifactDialogs implements AutoCloseable {
                     renderTypeSelect(s);
                 }
             }
-            case "t" -> {
-                s.type = types.get(Integer.parseInt(arg));
-                s.artifactId = null;
-                askLink(s);
-            }
+            case "t" -> onTypeChosen(s, types.get(Integer.parseInt(arg)));
+            case "sys" -> onSystemChosen(s, systems.get(Integer.parseInt(arg)));
             case "a" -> {
                 s.artifactId = Long.parseLong(arg);
                 showArtifactActions(s);
@@ -374,17 +374,10 @@ public class ArtifactDialogs implements AutoCloseable {
                 }
             }
             case "ren" -> {
-                if (!can(s, Permission.ARTIFACT_EDIT)) {
-                    return;
-                }
-                s.step = Step.RENAME_INPUT;
-                Artifact a = repo.artifact(s.artifactId).orElseThrow();
-                render(s, header(s) + "Сейчас: " + titledLink(a) + "\n\nПришлите новое название ссылки.",
-                        keyboard(row(backButton())));
-            }
-            case "keep" -> {
-                if (s.step == Step.TITLE_INPUT) {
-                    saveArtifact(s, s.titleDefault != null ? s.titleDefault : defaultTitle(s));
+                // Only СТ / Макеты have a changeable part — the system (ВТБО / ВТБ Про)
+                if (s.step == Step.ACTION_SELECT && can(s, Permission.ARTIFACT_EDIT) && systemTypes.contains(s.type)) {
+                    s.changingSystem = true;
+                    showSystemSelect(s);
                 }
             }
             case "del" -> {
@@ -504,7 +497,8 @@ public class ArtifactDialogs implements AutoCloseable {
         s.type = null;
         s.artifactId = null;
         s.pendingUrl = null;
-        s.suggestedTitle = null;
+        s.pendingTitle = null;
+        s.changingSystem = false;
         boolean canEdit = can(s, Permission.ARTIFACT_EDIT);
         List<Artifact> artifacts = sorted(repo.artifacts(s.epic.id()));
 
@@ -517,7 +511,7 @@ public class ArtifactDialogs implements AutoCloseable {
             text.append("Артефактов пока нет.");
         } else {
             artifacts.forEach(a -> text.append("➡️").append(titledLink(a)).append('\n'));
-            text.append("\nНажмите на ссылку, чтобы заменить, переименовать или удалить её.");
+            text.append("\nНажмите на ссылку, чтобы заменить или удалить её (у СТ и Макетов — сменить систему).");
         }
 
         List<InlineKeyboardRow> rows = new ArrayList<>();
@@ -537,10 +531,13 @@ public class ArtifactDialogs implements AutoCloseable {
         }
         s.type = a.get().type();
         s.step = Step.ACTION_SELECT;
+        s.pendingTitle = a.get().displayTitle();
         InlineKeyboardRow actions = new InlineKeyboardRow();
         if (can(s, Permission.ARTIFACT_EDIT)) {
             actions.add(button("🔁 Ссылку", "rep"));
-            actions.add(button("✏️ Название", "ren"));
+            if (systemTypes.contains(s.type)) {
+                actions.add(button("✏️ Система", "ren"));
+            }
         }
         if (can(s, Permission.ARTIFACT_DELETE)) {
             actions.add(button("🗑 Удалить", "del"));
@@ -568,36 +565,76 @@ public class ArtifactDialogs implements AutoCloseable {
             return;
         }
         s.pendingUrl = link.url();
-        s.suggestedTitle = link.title() != null && link.title().length() <= MAX_TITLE ? link.title() : null;
-        askTitle(s);
+        saveArtifact(s);
     }
 
-    private void askTitle(Session s) {
-        s.step = Step.TITLE_INPUT;
-        s.titleDefault = s.suggestedTitle != null ? s.suggestedTitle : defaultTitle(s);
-        render(s, header(s) + "Ссылка: " + Html.link(s.pendingUrl, shortUrl(s.pendingUrl)) + "\n\n"
-                        + "Как назвать её в списке? Пришлите название, например «" + Html.escape(s.type)
-                        + " ВТБО» или «Макеты ИБ Figma».",
-                keyboard(row(button("Оставить «" + s.titleDefault + "»", "keep")), row(cancelButton())));
-    }
-
-    /** Current title when replacing a link, otherwise the type. */
-    private String defaultTitle(Session s) {
-        if (s.artifactId != null) {
-            Optional<Artifact> a = repo.artifact(s.artifactId);
-            if (a.isPresent()) {
-                return a.get().displayTitle();
-            }
-        }
-        return s.type;
-    }
-
-    private void saveArtifact(Session s, String title) {
-        if (title.isEmpty() || title.length() > MAX_TITLE) {
-            s.notice = "❗ Название должно быть от 1 до " + MAX_TITLE + " символов.";
-            askTitle(s);
+    /**
+     * Titles are fixed: the type itself ("БТ"), or the type and the system for СТ / Макеты ("СТ ВТБО").
+     * One link per such slot — choosing a filled slot replaces its link.
+     */
+    private void onTypeChosen(Session s, String type) {
+        s.type = type;
+        s.changingSystem = false;
+        if (systemTypes.contains(type)) {
+            showSystemSelect(s);
             return;
         }
+        s.pendingTitle = type;
+        s.artifactId = slot(s, type).map(Artifact::id).orElse(null);
+        askLink(s);
+    }
+
+    private void showSystemSelect(Session s) {
+        s.step = Step.SYSTEM_SELECT;
+        InlineKeyboardRow row = new InlineKeyboardRow();
+        for (int i = 0; i < systems.size(); i++) {
+            boolean filled = slot(s, systemTitle(s.type, systems.get(i))).isPresent();
+            row.add(button(systems.get(i) + (filled ? " ✅" : ""), "sys:" + i));
+        }
+        String question = s.changingSystem
+                ? "Сейчас: " + Html.escape(s.pendingTitle) + ". На какую систему поменять?"
+                : "Для какой системы? (✅ — ссылка уже есть, её можно заменить)";
+        render(s, header(s) + question, keyboard(row, row(s.changingSystem ? backButton() : cancelButton())));
+    }
+
+    private void onSystemChosen(Session s, String system) {
+        String title = systemTitle(s.type, system);
+        Optional<Artifact> filled = slot(s, title);
+        if (s.changingSystem) {
+            s.changingSystem = false;
+            Artifact a = repo.artifact(s.artifactId).orElseThrow();
+            if (filled.isPresent() && filled.get().id() != a.id()) {
+                s.notice = "❗ " + title + " уже есть — сначала замените или удалите её ссылку.";
+                showHub(s);
+                return;
+            }
+            if (!a.displayTitle().equals(title)) {
+                repo.renameArtifact(a.id(), title, s.user);
+                s.savedLines.add("➡️" + Html.link(a.url(), title) + " — система изменена");
+                s.notice = "✏️ " + a.displayTitle() + " → " + title;
+            }
+            showHub(s);
+            return;
+        }
+        s.pendingTitle = title;
+        s.artifactId = filled.map(Artifact::id).orElse(null);
+        askLink(s);
+    }
+
+    /** "СТ" + "ВТБО" -> "СТ ВТБО". */
+    private static String systemTitle(String type, String system) {
+        return type + " " + system;
+    }
+
+    /** The link already filling this slot (same title), if any. */
+    private Optional<Artifact> slot(Session s, String title) {
+        return repo.artifacts(s.epic.id()).stream()
+                .filter(a -> a.displayTitle().equalsIgnoreCase(title))
+                .findFirst();
+    }
+
+    private void saveArtifact(Session s) {
+        String title = s.pendingTitle != null ? s.pendingTitle : s.type;
         boolean replace = s.artifactId != null;
         if (replace) {
             Artifact old = repo.artifact(s.artifactId).orElseThrow();
@@ -622,7 +659,7 @@ public class ArtifactDialogs implements AutoCloseable {
         s.type = null;
         s.artifactId = null;
         s.pendingUrl = null;
-        s.suggestedTitle = null;
+        s.pendingTitle = null;
         s.step = Step.ADD_MORE;
         render(s, "📎 <b>" + Html.escape(s.epic.title()) + "</b>\n\n✅ " + line + "\n\n"
                         + "Добавить ещё артефакт к этому эпику?",
@@ -646,19 +683,6 @@ public class ArtifactDialogs implements AutoCloseable {
         }
         sb.append(String.join("\n", s.savedLines));
         finish(s, sb.toString());
-    }
-
-    private void onRename(Session s, String title) {
-        if (title.isEmpty() || title.length() > MAX_TITLE) {
-            s.notice = "❗ Название должно быть от 1 до " + MAX_TITLE + " символов.";
-            onAction(s, "ren", "");
-            return;
-        }
-        Artifact a = repo.artifact(s.artifactId).orElseThrow();
-        repo.renameArtifact(a.id(), title, s.user);
-        s.savedLines.add("➡️" + Html.link(a.url(), title) + " — название изменено");
-        s.notice = "✏️ " + title + " — название изменено";
-        showHub(s);
     }
 
     private void onEpicText(Session s, String text) {
@@ -959,7 +983,7 @@ public class ArtifactDialogs implements AutoCloseable {
             rows.add(current);
         }
         rows.add(row(cancelButton()));
-        render(s, header(s) + "Выберите тип артефакта (✅ — уже есть ссылки):", keyboard(rows));
+        render(s, header(s) + "Выберите тип артефакта (✅ — ссылка уже есть, выбор заменит её):", keyboard(rows));
     }
 
     /** "СТ ВТБО" stays as is; "ИБ Figma" of type Макеты becomes "Макеты · ИБ Figma". */
@@ -974,8 +998,10 @@ public class ArtifactDialogs implements AutoCloseable {
             case ARCHIVE -> "📦 ";
             default -> "📎 ";
         }).append("<b>").append(Html.escape(s.epic.title()));
-        if (s.type != null) {
-            sb.append(" · ").append(Html.escape(s.type));
+        // "СТ ВТБО" once the slot is known, otherwise just the type
+        String what = s.pendingTitle != null && !s.changingSystem ? s.pendingTitle : s.type;
+        if (what != null) {
+            sb.append(" · ").append(Html.escape(what));
         }
         return sb.append("</b>\n\n").toString();
     }
