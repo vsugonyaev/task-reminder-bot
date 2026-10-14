@@ -29,12 +29,11 @@ import java.util.concurrent.TimeUnit;
 /**
  * Step-by-step dialogs (inline buttons + one "panel" message edited in place) for artifact commands:
  *
- *  - /artifact_add      — choose or create an epic (a new one gets an optional "assignees" step),
- *                         choose a type, send a link and give it a title (add or replace);
- *  - /artifact_edit     — choose an epic, then an artifact (replace link, rename, delete) or assignees;
+ *  - /artifact_add      — choose or create an epic (a new one gets an optional "assignees" step); then the epic
+ *                         panel: add links (type, link, title), replace / rename / delete links, assignees;
  *  - /artifacts         — choose an epic, get its assignees and links;
- *  - /epic_archive      — archive an epic;
- *  - /artifacts_archive — the same for archived epics.
+ *  - /archivate         — archive an epic;
+ *  - /archiv_list       — the same as /artifacts for archived epics.
  *
  * One dialog per user per chat; only its author can press the buttons. When a dialog ends (done, cancelled
  * or timed out) all its messages are deleted; results are posted separately and deleted after a while.
@@ -46,13 +45,20 @@ public class ArtifactDialogs implements AutoCloseable {
 
     public static final Map<String, String> COMMANDS = new LinkedHashMap<>();
 
+    public static final String ARCHIVE_LIST_COMMAND = "/archiv_list";
+
     static {
-        COMMANDS.put("/artifacts", "Артефакты эпика");
-        COMMANDS.put("/artifact_add", "Добавить артефакт");
-        COMMANDS.put("/artifact_edit", "Изменить ссылку или исполнителей");
-        COMMANDS.put("/epic_archive", "Отправить эпик в архив");
-        COMMANDS.put("/artifacts_archive", "Артефакты архивных эпиков");
+        COMMANDS.put("/artifacts", "Посмотреть артефакты эпика");
+        COMMANDS.put("/artifact_add", "Добавить или изменить артефакты и исполнителей");
+        COMMANDS.put("/archivate", "Отправить эпик в архив");
+        COMMANDS.put(ARCHIVE_LIST_COMMAND, "Артефакты архивных эпиков");
     }
+
+    /** Renamed commands: old name -> new one (the bot answers with a hint). */
+    public static final Map<String, String> RENAMED_COMMANDS = Map.of(
+            "/artifact_edit", "/artifact_add",
+            "/epic_archive", "/archivate",
+            "/artifacts_archive", ARCHIVE_LIST_COMMAND);
 
     /** Available only in test chats: permanently deletes artifact data created in the chat. */
     public static final String CLEANUP_COMMAND = "/test_cleanup";
@@ -64,12 +70,13 @@ public class ArtifactDialogs implements AutoCloseable {
     private static final int MAX_TITLE = 100;
     private static final int MAX_NAME = 64;
 
-    private enum Kind { ADD, EDIT, VIEW, VIEW_ARCHIVED, ARCHIVE, CLEANUP }
+    /** ADD is /artifact_add — adding and editing artifacts of an epic. */
+    private enum Kind { ADD, VIEW, VIEW_ARCHIVED, ARCHIVE, CLEANUP }
 
     private enum Step {
-        EPIC_SELECT, EPIC_CONFIRM, TYPE_SELECT, MODE_SELECT, REPLACE_SELECT, LINK_INPUT, TITLE_INPUT,
-        ARTIFACT_SELECT, ACTION_SELECT, RENAME_INPUT, DELETE_CONFIRM, ARCHIVE_CONFIRM, CLEANUP_CONFIRM,
-        TEAM_ROLES, TEAM_PEOPLE, TEAM_MANUAL, ADD_MORE
+        EPIC_SELECT, EPIC_CONFIRM, HUB, TYPE_SELECT, LINK_INPUT, TITLE_INPUT, ADD_MORE,
+        ACTION_SELECT, RENAME_INPUT, DELETE_CONFIRM, ARCHIVE_CONFIRM, CLEANUP_CONFIRM,
+        TEAM_ROLES, TEAM_PEOPLE, TEAM_MANUAL
     }
 
     /** Steps that wait for a text message from the dialog author. */
@@ -100,8 +107,9 @@ public class ArtifactDialogs implements AutoCloseable {
         String suggestedTitle;
         /** What "Оставить «…»" on the title step saves. */
         String titleDefault;
-        /** Links saved in this /artifact_add dialog, for the final summary. */
+        /** Changes made in this /artifact_add dialog, for the final summary. */
         final List<String> savedLines = new ArrayList<>();
+        boolean teamEdited;
 
         /** Assignees step of a just created epic: continue to the type choice afterwards. */
         boolean teamThenTypes;
@@ -175,17 +183,15 @@ public class ArtifactDialogs implements AutoCloseable {
     public synchronized void onCommand(String command, long chatId, User from, int messageId) {
         Kind kind = switch (command) {
             case "/artifact_add" -> Kind.ADD;
-            case "/artifact_edit" -> Kind.EDIT;
             case "/artifacts" -> Kind.VIEW;
-            case "/artifacts_archive" -> Kind.VIEW_ARCHIVED;
-            case "/epic_archive" -> Kind.ARCHIVE;
-            case "/test_cleanup" -> Kind.CLEANUP;
+            case ARCHIVE_LIST_COMMAND -> Kind.VIEW_ARCHIVED;
+            case "/archivate" -> Kind.ARCHIVE;
+            case CLEANUP_COMMAND -> Kind.CLEANUP;
             default -> throw new IllegalArgumentException(command);
         };
 
         boolean allowed = switch (kind) {
-            case ADD -> can(chatId, from, Permission.ARTIFACT_EDIT);
-            case EDIT -> can(chatId, from, Permission.ARTIFACT_EDIT) || can(chatId, from, Permission.ARTIFACT_DELETE);
+            case ADD -> can(chatId, from, Permission.ARTIFACT_EDIT) || can(chatId, from, Permission.ARTIFACT_DELETE);
             case ARCHIVE -> can(chatId, from, Permission.EPIC_ARCHIVE);
             case CLEANUP -> testChatIds.contains(chatId) && can(chatId, from, Permission.ARTIFACT_DELETE);
             case VIEW, VIEW_ARCHIVED -> true;
@@ -310,8 +316,12 @@ public class ArtifactDialogs implements AutoCloseable {
     private void onAction(Session s, String action, String arg) {
         switch (action) {
             case "x" -> {
-                if (!s.savedLines.isEmpty()) {
-                    // Cancelled the next artifact: the ones already saved still deserve a summary
+                if (s.kind == Kind.ADD && s.epic != null && s.step != Step.HUB) {
+                    // Inside an epic "Отмена" only drops the current step
+                    showHub(s);
+                    return;
+                }
+                if (s.kind == Kind.ADD && s.epic != null && hasChanges(s)) {
                     finishAdding(s);
                     return;
                 }
@@ -342,37 +352,25 @@ public class ArtifactDialogs implements AutoCloseable {
                     }
                 }
             }
+            case "hub" -> showHub(s);
+            case "add" -> {
+                if (can(s, Permission.ARTIFACT_EDIT)) {
+                    s.step = Step.TYPE_SELECT;
+                    renderTypeSelect(s);
+                }
+            }
             case "t" -> {
                 s.type = types.get(Integer.parseInt(arg));
-                onTypeChosen(s);
-            }
-            case "add" -> {
                 s.artifactId = null;
                 askLink(s);
             }
-            case "rep" -> {
-                if (!can(s, Permission.ARTIFACT_EDIT)) {
-                    return;
-                }
-                if (s.step == Step.ACTION_SELECT) {
-                    askLink(s);
-                    return;
-                }
-                List<Artifact> existing = artifactsOfType(s);
-                if (existing.size() == 1) {
-                    s.artifactId = existing.getFirst().id();
-                    askLink(s);
-                } else {
-                    s.step = Step.REPLACE_SELECT;
-                    render(s, header(s) + "Какую ссылку заменить?", artifactKeyboard(existing, false));
-                }
-            }
             case "a" -> {
                 s.artifactId = Long.parseLong(arg);
-                if (s.step == Step.REPLACE_SELECT) {
+                showArtifactActions(s);
+            }
+            case "rep" -> {
+                if (s.step == Step.ACTION_SELECT && can(s, Permission.ARTIFACT_EDIT)) {
                     askLink(s);
-                } else {
-                    showArtifactActions(s);
                 }
             }
             case "ren" -> {
@@ -382,7 +380,7 @@ public class ArtifactDialogs implements AutoCloseable {
                 s.step = Step.RENAME_INPUT;
                 Artifact a = repo.artifact(s.artifactId).orElseThrow();
                 render(s, header(s) + "Сейчас: " + titledLink(a) + "\n\nПришлите новое название ссылки.",
-                        keyboard(row(cancelButton())));
+                        keyboard(row(backButton())));
             }
             case "keep" -> {
                 if (s.step == Step.TITLE_INPUT) {
@@ -397,14 +395,16 @@ public class ArtifactDialogs implements AutoCloseable {
                 Artifact a = repo.artifact(s.artifactId).orElseThrow();
                 render(s, header(s) + "Удалить ссылку " + titledLink(a) + "?\n"
                                 + "<i>Она пропадёт из списков, но останется в истории.</i>",
-                        keyboard(row(button("🗑 Да, удалить", "yes"), cancelButton())));
+                        keyboard(row(button("🗑 Да, удалить", "yes"), backButton())));
             }
             case "yes" -> {
                 if (s.step == Step.DELETE_CONFIRM && can(s, Permission.ARTIFACT_DELETE)) {
                     Artifact a = repo.artifact(s.artifactId).orElseThrow();
                     repo.deleteArtifact(s.artifactId, s.user);
-                    finish(s, "🗑 <b>" + Html.escape(s.epic.title()) + "</b>\n"
-                            + Html.escape(a.displayTitle()) + " — ссылка удалена");
+                    String line = Html.escape(a.displayTitle()) + " — удалено";
+                    s.savedLines.add("🗑 " + line);
+                    s.notice = "🗑 " + a.displayTitle() + " — удалено";
+                    showHub(s);
                 } else if (s.step == Step.CLEANUP_CONFIRM && testChatIds.contains(s.chatId)
                         && can(s, Permission.ARTIFACT_DELETE)) {
                     ArtifactRepository.ChatDataStats deleted = repo.deleteChatData(s.chatId);
@@ -413,18 +413,14 @@ public class ArtifactDialogs implements AutoCloseable {
                 } else if (s.step == Step.ARCHIVE_CONFIRM && can(s, Permission.EPIC_ARCHIVE)) {
                     repo.archiveEpic(s.epic.id(), s.user);
                     finish(s, "📦 Эпик <b>" + Html.escape(s.epic.title()) + "</b> отправлен в архив.\n"
-                            + "Документы по нему — в /artifacts_archive");
-                }
-            }
-            case "more" -> {
-                if (s.step == Step.ADD_MORE) {
-                    s.step = Step.TYPE_SELECT;
-                    renderTypeSelect(s);
+                            + "Документы по нему — в " + ARCHIVE_LIST_COMMAND);
                 }
             }
             case "done" -> {
-                if (s.step == Step.ADD_MORE) {
+                if (hasChanges(s)) {
                     finishAdding(s);
+                } else {
+                    cleanup(s);
                 }
             }
             // --- assignees ---
@@ -447,6 +443,7 @@ public class ArtifactDialogs implements AutoCloseable {
             case "m" -> {
                 if (can(s, Permission.ARTIFACT_EDIT)) {
                     repo.removeAssignee(Long.parseLong(arg), s.user);
+                    s.teamEdited = true;
                 }
                 showTeamPeople(s);
             }
@@ -460,11 +457,13 @@ public class ArtifactDialogs implements AutoCloseable {
             case "roles" -> showTeamRoles(s);
             case "tdone" -> {
                 if (s.teamThenTypes) {
+                    // New epic: assignees are done, go on to its first link
+                    s.teamThenTypes = false;
                     s.step = Step.TYPE_SELECT;
                     renderTypeSelect(s);
                 } else {
-                    finish(s, "👥 <b>" + Html.escape(s.epic.title()) + "</b>\n" + teamLines(s.epic.id(), true)
-                            + "\nИсполнители сохранены.");
+                    s.notice = "👥 Исполнители сохранены";
+                    showHub(s);
                 }
             }
             default -> log.warn("Unknown dialog action: {}", action);
@@ -475,31 +474,13 @@ public class ArtifactDialogs implements AutoCloseable {
         s.epic = epic;
         s.notice = null;
         switch (s.kind) {
-            case ADD -> {
-                s.step = Step.TYPE_SELECT;
-                renderTypeSelect(s);
-            }
-            case EDIT -> {
-                List<Artifact> artifacts = sorted(repo.artifacts(epic.id()));
-                boolean canTeam = can(s, Permission.ARTIFACT_EDIT);
-                if (artifacts.isEmpty() && !canTeam) {
-                    finish(s, "📂 <b>" + Html.escape(epic.title()) + "</b>\nАртефактов пока нет.");
-                    return;
-                }
-                s.step = Step.ARTIFACT_SELECT;
-                List<InlineKeyboardRow> rows = new ArrayList<>();
-                artifacts.forEach(a -> rows.add(row(button(artifactLabel(a), "a:" + a.id()))));
-                if (canTeam) {
-                    rows.add(row(button("👥 Исполнители", "team")));
-                }
-                rows.add(row(cancelButton()));
-                render(s, header(s) + (artifacts.isEmpty() ? "Артефактов пока нет." : "Что изменить?"), keyboard(rows));
-            }
+            case ADD -> showHub(s);
             case VIEW, VIEW_ARCHIVED -> finish(s, report(epic));
             case ARCHIVE -> {
                 s.step = Step.ARCHIVE_CONFIRM;
                 render(s, header(s) + "Отправить эпик в архив?\n"
-                                + "<i>Он пропадёт из списков, документы останутся доступны через /artifacts_archive.</i>",
+                                + "<i>Он пропадёт из списков, документы останутся доступны через "
+                                + ARCHIVE_LIST_COMMAND + ".</i>",
                         keyboard(row(button("📦 В архив", "yes"), cancelButton())));
             }
             default -> { /* CLEANUP has no epic choice */ }
@@ -514,9 +495,44 @@ public class ArtifactDialogs implements AutoCloseable {
         showTeamRoles(s);
     }
 
+    /**
+     * Epic panel of /artifact_add: its assignees and links. A link opens replace / rename / delete;
+     * "➕ Добавить ссылку", "👥 Исполнители", "✅ Готово" (summary of everything changed in the dialog).
+     */
+    private void showHub(Session s) {
+        s.step = Step.HUB;
+        s.type = null;
+        s.artifactId = null;
+        s.pendingUrl = null;
+        s.suggestedTitle = null;
+        boolean canEdit = can(s, Permission.ARTIFACT_EDIT);
+        List<Artifact> artifacts = sorted(repo.artifacts(s.epic.id()));
+
+        StringBuilder text = new StringBuilder("📎 <b>").append(Html.escape(s.epic.title())).append("</b>\n\n");
+        String team = teamLines(s.epic.id(), true);
+        if (!team.isEmpty()) {
+            text.append(team).append('\n');
+        }
+        if (artifacts.isEmpty()) {
+            text.append("Артефактов пока нет.");
+        } else {
+            artifacts.forEach(a -> text.append("➡️").append(titledLink(a)).append('\n'));
+            text.append("\nНажмите на ссылку, чтобы заменить, переименовать или удалить её.");
+        }
+
+        List<InlineKeyboardRow> rows = new ArrayList<>();
+        artifacts.forEach(a -> rows.add(row(button(artifactLabel(a), "a:" + a.id()))));
+        if (canEdit) {
+            rows.add(row(button("➕ Добавить ссылку", "add"), button("👥 Исполнители", "team")));
+        }
+        rows.add(row(button("✅ Готово", "done")));
+        render(s, text.toString(), keyboard(rows));
+    }
+
     private void showArtifactActions(Session s) {
         Optional<Artifact> a = repo.artifact(s.artifactId);
         if (a.isEmpty()) {
+            showHub(s);
             return;
         }
         s.type = a.get().type();
@@ -529,23 +545,7 @@ public class ArtifactDialogs implements AutoCloseable {
         if (can(s, Permission.ARTIFACT_DELETE)) {
             actions.add(button("🗑 Удалить", "del"));
         }
-        render(s, header(s) + titledLink(a.get()) + "\n\nЧто сделать?", keyboard(actions, row(cancelButton())));
-    }
-
-    private void onTypeChosen(Session s) {
-        List<Artifact> existing = artifactsOfType(s);
-        if (existing.isEmpty()) {
-            s.artifactId = null;
-            askLink(s);
-            return;
-        }
-        s.step = Step.MODE_SELECT;
-        StringBuilder text = new StringBuilder(header(s)).append("Уже есть:\n");
-        existing.forEach(a -> text.append("➡️").append(titledLink(a)).append('\n'));
-        text.append("\nДобавить ещё одну ссылку или заменить существующую?");
-        render(s, text.toString(), keyboard(
-                row(button("➕ Добавить", "add"), button("🔁 Заменить", "rep")),
-                row(cancelButton())));
+        render(s, header(s) + titledLink(a.get()) + "\n\nЧто сделать?", keyboard(actions, row(backButton())));
     }
 
     private void askLink(Session s) {
@@ -611,13 +611,14 @@ public class ArtifactDialogs implements AutoCloseable {
             repo.addArtifact(s.epic.id(), s.type, title, s.pendingUrl, s.user);
         }
         String line = "➡️" + Html.link(s.pendingUrl, title) + (replace ? " — ссылка заменена" : " — добавлено");
+        s.savedLines.add(line);
 
-        if (s.kind != Kind.ADD) {
-            finish(s, "✅ <b>" + Html.escape(s.epic.title()) + "</b>\n" + line);
+        if (replace) {
+            s.notice = "✅ " + title + " — ссылка заменена";
+            showHub(s);
             return;
         }
-        // Adding is usually done for several documents at once: offer the next one right away
-        s.savedLines.add(line);
+        // Documents are usually added several at once: offer the next one right away
         s.type = null;
         s.artifactId = null;
         s.pendingUrl = null;
@@ -625,12 +626,26 @@ public class ArtifactDialogs implements AutoCloseable {
         s.step = Step.ADD_MORE;
         render(s, "📎 <b>" + Html.escape(s.epic.title()) + "</b>\n\n✅ " + line + "\n\n"
                         + "Добавить ещё артефакт к этому эпику?",
-                keyboard(row(button("➕ Ещё артефакт", "more"), button("✅ Готово", "done"))));
+                keyboard(row(button("➕ Ещё артефакт", "add"), button("✏️ Все ссылки эпика", "hub")),
+                        row(button("✅ Готово", "done"))));
     }
 
-    /** End of /artifact_add: one summary of everything saved in this dialog. */
+    private boolean hasChanges(Session s) {
+        return !s.savedLines.isEmpty() || s.teamEdited;
+    }
+
+    /** End of /artifact_add: one summary of everything changed in this dialog. */
     private void finishAdding(Session s) {
-        finish(s, "✅ <b>" + Html.escape(s.epic.title()) + "</b>\n" + String.join("\n", s.savedLines));
+        StringBuilder sb = new StringBuilder("✅ <b>").append(Html.escape(s.epic.title())).append("</b>\n");
+        if (s.teamEdited) {
+            String team = teamLines(s.epic.id(), true);
+            sb.append(team.isEmpty() ? "Исполнители не назначены\n" : team);
+            if (!s.savedLines.isEmpty()) {
+                sb.append('\n');
+            }
+        }
+        sb.append(String.join("\n", s.savedLines));
+        finish(s, sb.toString());
     }
 
     private void onRename(Session s, String title) {
@@ -641,7 +656,9 @@ public class ArtifactDialogs implements AutoCloseable {
         }
         Artifact a = repo.artifact(s.artifactId).orElseThrow();
         repo.renameArtifact(a.id(), title, s.user);
-        finish(s, "✏️ <b>" + Html.escape(s.epic.title()) + "</b>\n➡️" + Html.link(a.url(), title) + " — название изменено");
+        s.savedLines.add("➡️" + Html.link(a.url(), title) + " — название изменено");
+        s.notice = "✏️ " + title + " — название изменено";
+        showHub(s);
     }
 
     private void onEpicText(Session s, String text) {
@@ -658,7 +675,7 @@ public class ArtifactDialogs implements AutoCloseable {
             Optional<Epic> existing = repo.epicByKey(s.chatId, parsed.key());
             if (existing.isPresent()) {
                 if (existing.get().archived()) {
-                    s.notice = "🗄 Эпик " + parsed.key() + " в архиве — его документы смотрите в /artifacts_archive";
+                    s.notice = "🗄 Эпик " + parsed.key() + " в архиве — его документы смотрите в " + ARCHIVE_LIST_COMMAND;
                     renderEpicSelect(s);
                 } else {
                     onEpicChosen(s, existing.get());
@@ -819,9 +836,11 @@ public class ArtifactDialogs implements AutoCloseable {
                 .findFirst();
         if (existing.isPresent()) {
             repo.removeAssignee(existing.get().id(), s.user);
+            s.teamEdited = true;
         } else {
             candidates(s).stream().filter(p -> p.userId() == userId).findFirst()
                     .ifPresent(p -> repo.addAssignee(s.epic.id(), s.role, p.userId(), p.name(), s.user));
+            s.teamEdited = true;
         }
         showTeamPeople(s);
     }
@@ -845,6 +864,7 @@ public class ArtifactDialogs implements AutoCloseable {
                 .findFirst();
         String name = known.map(Person::name).orElse(text);
         repo.addAssignee(s.epic.id(), s.role, known.map(Person::userId).orElse(null), name, s.user);
+        s.teamEdited = true;
 
         // Back to the roles: the step is clearly done (staying on the list invited a press that removed the person)
         s.notice = "✅ " + name + " — " + s.role;
@@ -879,10 +899,9 @@ public class ArtifactDialogs implements AutoCloseable {
     private String epicSelectText(Session s) {
         String hint = "Выберите эпик или пришлите номер / часть названия для поиска.";
         StringBuilder text = new StringBuilder(switch (s.kind) {
-            case ADD -> "📎 <b>Добавление артефакта</b>\nВыберите эпик или пришлите номер и название нового:\n"
+            case ADD -> "📎 <b>Артефакты эпика: добавить или изменить</b>\nВыберите эпик или пришлите номер и название нового:\n"
                     + "<code>123 Название эпика</code> — " + matcher.prefix() + "- бот подставит сам.\n"
                     + "Можно прислать номер или часть названия — поищу среди существующих.";
-            case EDIT -> "✏️ <b>Изменение артефактов и исполнителей</b>\n" + hint;
             case VIEW -> "📂 <b>Артефакты эпика</b>\n" + hint;
             case VIEW_ARCHIVED -> "🗄 <b>Архив эпиков</b>\n" + hint;
             case ARCHIVE -> "📦 <b>Архивация эпика</b>\n" + hint;
@@ -943,16 +962,6 @@ public class ArtifactDialogs implements AutoCloseable {
         render(s, header(s) + "Выберите тип артефакта (✅ — уже есть ссылки):", keyboard(rows));
     }
 
-    private InlineKeyboardMarkup artifactKeyboard(List<Artifact> artifacts, boolean withType) {
-        List<InlineKeyboardRow> rows = new ArrayList<>();
-        for (int i = 0; i < artifacts.size(); i++) {
-            Artifact a = artifacts.get(i);
-            rows.add(row(button(withType ? artifactLabel(a) : (i + 1) + ". " + a.displayTitle(), "a:" + a.id())));
-        }
-        rows.add(row(cancelButton()));
-        return keyboard(rows);
-    }
-
     /** "СТ ВТБО" stays as is; "ИБ Figma" of type Макеты becomes "Макеты · ИБ Figma". */
     private static String artifactLabel(Artifact a) {
         String title = a.displayTitle();
@@ -962,7 +971,6 @@ public class ArtifactDialogs implements AutoCloseable {
     /** "📎 STRLP-123 · Name · СТ", ending with an empty line. */
     private String header(Session s) {
         StringBuilder sb = new StringBuilder(switch (s.kind) {
-            case EDIT -> "✏️ ";
             case ARCHIVE -> "📦 ";
             default -> "📎 ";
         }).append("<b>").append(Html.escape(s.epic.title()));
@@ -1056,10 +1064,6 @@ public class ArtifactDialogs implements AutoCloseable {
         return access.allowed(s.chatId, s.userId, permission);
     }
 
-    private List<Artifact> artifactsOfType(Session s) {
-        return repo.artifacts(s.epic.id()).stream().filter(a -> a.type().equals(s.type)).toList();
-    }
-
     /** By configured type order, then in the order they were added. */
     private List<Artifact> sorted(List<Artifact> artifacts) {
         List<Artifact> result = new ArrayList<>(artifacts);
@@ -1100,6 +1104,11 @@ public class ArtifactDialogs implements AutoCloseable {
     private static InlineKeyboardButton button(String text, String data) {
         String label = text.length() > MAX_BUTTON_TEXT ? text.substring(0, MAX_BUTTON_TEXT - 1) + "…" : text;
         return InlineKeyboardButton.builder().text(label).callbackData(data).build();
+    }
+
+    /** Back to the epic panel of /artifact_add. */
+    private static InlineKeyboardButton backButton() {
+        return button("◀️ К эпику", "hub");
     }
 
     private static InlineKeyboardButton cancelButton() {

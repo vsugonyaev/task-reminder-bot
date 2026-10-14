@@ -172,6 +172,14 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
         String arg = parts.length > 1 ? parts[1].trim() : "";
         String command = parseCommand(parts[0]);
 
+        String renamedTo = ArtifactDialogs.RENAMED_COMMANDS.get(command);
+        if (renamedTo != null) {
+            deleteLater(chatId, message.getMessageId(), config.commandsDeleteAfter());
+            if (artifacts != null && (chatId == config.chatId() || isTestChat(chatId))) {
+                reply(chatId, "ℹ️ Команда переименована — используйте " + renamedTo);
+            }
+            return;
+        }
         if (ArtifactDialogs.COMMANDS.containsKey(command) || ArtifactDialogs.CLEANUP_COMMAND.equals(command)) {
             boolean allowedChat = ArtifactDialogs.CLEANUP_COMMAND.equals(command)
                     ? isTestChat(chatId)

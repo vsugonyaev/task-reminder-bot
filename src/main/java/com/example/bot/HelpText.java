@@ -42,11 +42,10 @@ final class HelpText {
 
         if (artifactsEnabled && kind != ChatKind.OTHER) {
             sb.append("<b>📂 Артефакты эпиков</b>\n")
-                    .append("/artifacts — исполнители и ссылки на документы эпика\n")
-                    .append("/artifacts_archive — то же по архивным эпикам\n")
-                    .append("/artifact_add — добавить ссылку на документ (для нового эпика — и исполнителей)\n")
-                    .append("/artifact_edit — заменить, переименовать или удалить ссылку, изменить исполнителей\n")
-                    .append("/epic_archive — отправить эпик в архив\n")
+                    .append("/artifacts — посмотреть исполнителей и ссылки эпика\n")
+                    .append("/artifact_add — добавить или изменить: ссылки (добавить, заменить, переименовать, удалить) и исполнителей\n")
+                    .append("/archivate — отправить эпик в архив\n")
+                    .append("/archiv_list — посмотреть артефакты архивных эпиков\n")
                     .append("Типы документов: ").append(Html.escape(String.join(", ", config.artifactTypes()))).append("\n\n")
                     .append("<b>🔐 Кто может</b>\n")
                     .append("• смотреть — все\n")

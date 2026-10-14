@@ -4,11 +4,11 @@ package com.example.access;
  * Actions restricted by member tags. Config key: access.&lt;key&gt; = comma-separated tags (empty — everyone).
  */
 public enum Permission {
-    /** Add artifacts and replace links (/artifact_add, /artifact_edit → replace). */
+    /** Add artifacts, replace and rename links, change assignees (/artifact_add). */
     ARTIFACT_EDIT("artifact-edit"),
-    /** Delete artifact links (/artifact_edit → delete). */
+    /** Delete artifact links (/artifact_add → link → delete). */
     ARTIFACT_DELETE("artifact-delete"),
-    /** Archive epics (/epic_archive). */
+    /** Archive epics (/archivate). */
     EPIC_ARCHIVE("epic-archive");
 
     private final String key;
