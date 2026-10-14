@@ -242,7 +242,7 @@ public class ArtifactDialogs implements AutoCloseable {
 
         s.panelId = chat.send(chatId, epicSelectText(s), epicKeyboard(s));
         sessions.put(key(chatId, s.userId), s);
-        log.info("Dialog {} started by {}", kind, s.user);
+        log.info("Dialog {} started by {} in chat {}", kind, s.user, chatId);
     }
 
     /** Returns true if the message was consumed by a dialog waiting for text input. */
@@ -329,7 +329,7 @@ public class ArtifactDialogs implements AutoCloseable {
                     return;
                 }
                 cleanup(s);
-                log.info("Dialog {} cancelled by {}", s.kind, s.user);
+                log.info("Dialog {} cancelled by {} in chat {}", s.kind, s.user, s.chatId);
             }
             case "n" -> { /* page counter, no-op */ }
             case "p" -> {
@@ -689,6 +689,7 @@ public class ArtifactDialogs implements AutoCloseable {
         EpicMatcher.ParsedEpic parsed = matcher.parse(text);
 
         if (s.kind == Kind.ADD && matcher.foreignPrefix(text) != null) {
+            logEpicInput(s, text, "rejected: foreign prefix " + matcher.foreignPrefix(text));
             s.notice = "❗ Эпики только из " + matcher.prefix() + ". Пришлите номер эпика и название, например: 123 Название — "
                     + matcher.prefix() + "- бот подставит сам.";
             renderEpicSelect(s);
@@ -699,14 +700,17 @@ public class ArtifactDialogs implements AutoCloseable {
             Optional<Epic> existing = repo.epicByKey(s.chatId, parsed.key());
             if (existing.isPresent()) {
                 if (existing.get().archived()) {
+                    logEpicInput(s, text, "rejected: " + parsed.key() + " is archived");
                     s.notice = "🗄 Эпик " + parsed.key() + " в архиве — его документы смотрите в " + ARCHIVE_LIST_COMMAND;
                     renderEpicSelect(s);
                 } else {
+                    logEpicInput(s, text, "existing " + parsed.key());
                     onEpicChosen(s, existing.get());
                 }
                 return;
             }
             if (parsed.name() == null) {
+                logEpicInput(s, text, "asked for a name: " + parsed.key() + " does not exist");
                 s.notice = "Эпика " + parsed.key() + " ещё нет. Чтобы создать, пришлите номер вместе с названием: "
                         + parsed.key().substring(parsed.key().indexOf('-') + 1) + " Название";
                 renderEpicSelect(s);
@@ -714,9 +718,11 @@ public class ArtifactDialogs implements AutoCloseable {
             }
             List<Epic> similar = matcher.similar(text, repo.epics(s.chatId, false));
             if (similar.isEmpty()) {
+                logEpicInput(s, text, "creating " + parsed.key());
                 onEpicCreated(s, repo.createEpic(s.chatId, parsed.key(), parsed.name(), s.user));
                 return;
             }
+            logEpicInput(s, text, "similar epics offered: " + similar.stream().map(Epic::key).toList());
             s.pendingEpic = parsed;
             s.step = Step.EPIC_CONFIRM;
             List<InlineKeyboardRow> rows = new ArrayList<>();
@@ -737,9 +743,11 @@ public class ArtifactDialogs implements AutoCloseable {
             found = matcher.similar(text, base);
         }
         if (found.size() == 1 && parsed != null) {
+            logEpicInput(s, text, "found " + found.getFirst().key());
             onEpicChosen(s, found.getFirst());
             return;
         }
+        logEpicInput(s, text, found.isEmpty() ? "search: nothing found" : "search: found " + found.size());
         s.search = text;
         s.shownEpics = found;
         s.page = 0;
@@ -749,6 +757,12 @@ public class ArtifactDialogs implements AutoCloseable {
                     + matcher.prefix() + "- бот подставит сам.";
         }
         renderEpicSelect(s);
+    }
+
+    /** What the author typed on the epic step and what the bot did with it — to see why an epic was not created. */
+    private void logEpicInput(Session s, String text, String outcome) {
+        log.info("Dialog {}: epic input \"{}\" from {} in chat {} -> {}", s.kind,
+                text.length() > 120 ? text.substring(0, 120) + "…" : text, s.user, s.chatId, outcome);
     }
 
     // ------------------------------------------------------------------ assignees
@@ -1055,7 +1069,7 @@ public class ArtifactDialogs implements AutoCloseable {
         cleanup(s);
         int id = chat.send(s.chatId, resultHtml, null);
         chat.deleteLater(s.chatId, id, resultTtl);
-        log.info("Dialog {} finished by {}", s.kind, s.user);
+        log.info("Dialog {} finished by {} in chat {}", s.kind, s.user, s.chatId);
     }
 
     private void cleanup(Session s) {
@@ -1072,7 +1086,7 @@ public class ArtifactDialogs implements AutoCloseable {
             new ArrayList<>(sessions.values()).stream()
                     .filter(s -> s.lastActivity.isBefore(deadline))
                     .forEach(s -> {
-                        log.info("Dialog {} of {} timed out", s.kind, s.user);
+                        log.info("Dialog {} of {} in chat {} timed out", s.kind, s.user, s.chatId);
                         cleanup(s);
                     });
         } catch (RuntimeException e) {

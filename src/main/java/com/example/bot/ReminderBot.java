@@ -23,6 +23,7 @@ import org.telegram.telegrambots.meta.api.objects.commands.BotCommand;
 import org.telegram.telegrambots.meta.api.objects.commands.scope.BotCommandScopeChat;
 import org.telegram.telegrambots.meta.api.objects.LinkPreviewOptions;
 import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.User;
 import org.telegram.telegrambots.meta.api.objects.chatmember.ChatMember;
 import org.telegram.telegrambots.meta.api.objects.message.Message;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
@@ -172,6 +173,10 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
         String[] parts = message.getText().trim().split("\\s+", 2);
         String arg = parts.length > 1 ? parts[1].trim() : "";
         String command = parseCommand(parts[0]);
+        if (isBotCommand(command)) {
+            log.info("Command {}{} from {} in chat {}", command, arg.isEmpty() ? "" : " " + arg,
+                    userLabel(message.getFrom()), chatId);
+        }
 
         String renamedTo = ArtifactDialogs.RENAMED_COMMANDS.get(command);
         if (renamedTo != null) {
@@ -241,6 +246,22 @@ public class ReminderBot implements LongPollingSingleThreadUpdateConsumer, ChatA
     }
 
     private static final Set<String> OWN_COMMANDS = Set.of("/chatid", "/sprint", "/help", "/test");
+
+    /** Commands of this bot (including renamed ones) — other bots' commands are not logged. */
+    private static boolean isBotCommand(String command) {
+        return OWN_COMMANDS.contains(command) || ArtifactDialogs.COMMANDS.containsKey(command)
+                || ArtifactDialogs.CLEANUP_COMMAND.equals(command) || ArtifactDialogs.RENAMED_COMMANDS.containsKey(command);
+    }
+
+    /** "@username (id)" or "First Last (id)". */
+    private static String userLabel(User u) {
+        if (u == null) {
+            return "unknown";
+        }
+        String name = u.getUserName() != null ? "@" + u.getUserName()
+                : (u.getFirstName() + (u.getLastName() != null ? " " + u.getLastName() : "")).trim();
+        return name + " (" + u.getId() + ")";
+    }
 
     /** Sends a reply to a command and schedules its deletion. Returns the message id. */
     private int reply(long chatId, String html) {
